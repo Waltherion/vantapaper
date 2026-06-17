@@ -2,6 +2,7 @@
 
 #include <QFile>
 #include <QString>
+#include <QImage>
 #include <QtCore/qfloat16.h>
 
 #include <ultrahdr_api.h>
@@ -193,9 +194,53 @@ HdrImage decodeAvif(const QString &path)
     return result;
 }
 
+// --- General SDR images (PNG/JPEG/WebP/... via Qt's image plugins) ----------
+
+HdrImage decodeSdrImage(const QString &path)
+{
+    HdrImage result;
+
+    QImage img(path);
+    if (img.isNull()) {
+        std::fprintf(stderr, "vantapaper: could not load image %s (unsupported format?)\n",
+                     qPrintable(path));
+        return result;
+    }
+    img = img.convertToFormat(QImage::Format_RGBA8888);
+
+    result.w = img.width();
+    result.h = img.height();
+    result.rgba16f.resize(size_t(result.w) * result.h * 4);
+
+    // sRGB -> linear; 1.0 = reference white. Black (0) stays 0 -> true black on
+    // the HDR surface, which is exactly what makes SDR wallpapers look right here.
+    qfloat16 *dst = reinterpret_cast<qfloat16 *>(result.rgba16f.data());
+    for (int y = 0; y < result.h; ++y) {
+        const uchar *line = img.constScanLine(y);
+        for (int x = 0; x < result.w; ++x) {
+            const size_t o = (size_t(y) * result.w + x) * 4;
+            dst[o + 0] = qfloat16(srgbEotf(line[x * 4 + 0] / 255.0f));
+            dst[o + 1] = qfloat16(srgbEotf(line[x * 4 + 1] / 255.0f));
+            dst[o + 2] = qfloat16(srgbEotf(line[x * 4 + 2] / 255.0f));
+            dst[o + 3] = qfloat16(line[x * 4 + 3] / 255.0f);
+        }
+    }
+    std::fprintf(stderr, "vantapaper: loaded SDR image %dx%d via QImage\n", result.w, result.h);
+    return result;
+}
+
 HdrImage decodeImage(const QString &path)
 {
     if (path.endsWith(QStringLiteral(".avif"), Qt::CaseInsensitive))
         return decodeAvif(path);
-    return decodeUltraHdr(path); // .jpg/.jpeg and fallback
+
+    if (path.endsWith(QStringLiteral(".jpg"), Qt::CaseInsensitive)
+        || path.endsWith(QStringLiteral(".jpeg"), Qt::CaseInsensitive)) {
+        HdrImage uhdr = decodeUltraHdr(path); // UltraHDR gain-map JPEG, if it is one
+        if (uhdr.valid())
+            return uhdr;
+        // Otherwise fall through: a plain SDR JPEG.
+    }
+
+    return decodeSdrImage(path); // PNG/JPEG/WebP/BMP/... via Qt
 }
