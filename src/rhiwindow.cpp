@@ -77,28 +77,75 @@ void RhiWindow::init()
     m_rp.reset(m_sc->newCompatibleRenderPassDescriptor());
     m_sc->setRenderPassDescriptor(m_rp.get());
 
-    m_srb.reset(m_rhi->newShaderResourceBindings());
-    m_srb->create();
+    // If VANTAPAPER_IMAGE points at an UltraHDR JPEG, decode it and switch to
+    // image mode; otherwise show a built-in test pattern.
+    const QByteArray imagePath = qgetenv("VANTAPAPER_IMAGE");
+    if (!imagePath.isEmpty()) {
+        m_image = decodeUltraHdr(QString::fromLocal8Bit(imagePath));
+        m_imageMode = m_image.valid();
+        if (!m_imageMode)
+            qWarning("vantapaper: image decode failed -> falling back to test pattern");
+    }
 
-    // VANTAPAPER_PATTERN selects the test pattern: "split" (true-black vs HDR)
-    // or "nits" (the nits staircase). Defaults to nits.
-    const QByteArray pattern = qgetenv("VANTAPAPER_PATTERN").toLower();
-    const QString fragQsb = (pattern == "split")
-        ? QStringLiteral(":/shaders/testpattern.frag.qsb")
-        : QStringLiteral(":/shaders/nitstest.frag.qsb");
-    qInfo("vantapaper: pattern = %s", pattern == "split" ? "split" : "nits");
-
-    m_ps.reset(m_rhi->newGraphicsPipeline());
-    m_ps->setShaderStages({
-        { QRhiShaderStage::Vertex,   loadShader(QStringLiteral(":/shaders/fullscreen.vert.qsb")) },
-        { QRhiShaderStage::Fragment, loadShader(fragQsb) }
-    });
     QRhiVertexInputLayout inputLayout; // no vertex buffers; positions come from gl_VertexIndex
-    m_ps->setVertexInputLayout(inputLayout);
-    m_ps->setShaderResourceBindings(m_srb.get());
-    m_ps->setRenderPassDescriptor(m_rp.get());
-    if (!m_ps->create())
-        qFatal("vantapaper: failed to create graphics pipeline");
+
+    if (m_imageMode) {
+        bool okScale = false;
+        const float s = qEnvironmentVariable("VANTAPAPER_SCALE").toFloat(&okScale);
+        if (okScale) m_scale = s;
+        if (qEnvironmentVariableIsSet("VANTAPAPER_SPLIT"))
+            m_splitX = qEnvironmentVariable("VANTAPAPER_SPLIT").toFloat();
+
+        m_tex.reset(m_rhi->newTexture(QRhiTexture::RGBA16F, QSize(m_image.w, m_image.h)));
+        m_tex->create();
+        m_sampler.reset(m_rhi->newSampler(QRhiSampler::Linear, QRhiSampler::Linear, QRhiSampler::None,
+                                          QRhiSampler::ClampToEdge, QRhiSampler::ClampToEdge));
+        m_sampler->create();
+        m_ubo.reset(m_rhi->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, 4 * sizeof(float)));
+        m_ubo->create();
+
+        m_srb.reset(m_rhi->newShaderResourceBindings());
+        m_srb->setBindings({
+            QRhiShaderResourceBinding::uniformBuffer(0, QRhiShaderResourceBinding::FragmentStage, m_ubo.get()),
+            QRhiShaderResourceBinding::sampledTexture(1, QRhiShaderResourceBinding::FragmentStage,
+                                                      m_tex.get(), m_sampler.get())
+        });
+        m_srb->create();
+
+        m_ps.reset(m_rhi->newGraphicsPipeline());
+        m_ps->setShaderStages({
+            { QRhiShaderStage::Vertex,   loadShader(QStringLiteral(":/shaders/fullscreen.vert.qsb")) },
+            { QRhiShaderStage::Fragment, loadShader(QStringLiteral(":/shaders/image.frag.qsb")) }
+        });
+        m_ps->setVertexInputLayout(inputLayout);
+        m_ps->setShaderResourceBindings(m_srb.get());
+        m_ps->setRenderPassDescriptor(m_rp.get());
+        if (!m_ps->create())
+            qFatal("vantapaper: failed to create image pipeline");
+        qInfo("vantapaper: image mode %dx%d, scale=%.3f, splitX=%.3f",
+              m_image.w, m_image.h, m_scale, m_splitX);
+    } else {
+        m_srb.reset(m_rhi->newShaderResourceBindings());
+        m_srb->create();
+
+        // VANTAPAPER_PATTERN: "split" (true-black vs HDR) or "nits" (staircase). Default nits.
+        const QByteArray pattern = qgetenv("VANTAPAPER_PATTERN").toLower();
+        const QString fragQsb = (pattern == "split")
+            ? QStringLiteral(":/shaders/testpattern.frag.qsb")
+            : QStringLiteral(":/shaders/nitstest.frag.qsb");
+        qInfo("vantapaper: pattern = %s", pattern == "split" ? "split" : "nits");
+
+        m_ps.reset(m_rhi->newGraphicsPipeline());
+        m_ps->setShaderStages({
+            { QRhiShaderStage::Vertex,   loadShader(QStringLiteral(":/shaders/fullscreen.vert.qsb")) },
+            { QRhiShaderStage::Fragment, loadShader(fragQsb) }
+        });
+        m_ps->setVertexInputLayout(inputLayout);
+        m_ps->setShaderResourceBindings(m_srb.get());
+        m_ps->setRenderPassDescriptor(m_rp.get());
+        if (!m_ps->create())
+            qFatal("vantapaper: failed to create graphics pipeline");
+    }
 
     m_initialized = true;
 }
@@ -150,7 +197,22 @@ void RhiWindow::render()
     QRhiCommandBuffer *cb = m_sc->currentFrameCommandBuffer();
     const QSize outputSize = m_sc->currentPixelSize();
 
-    cb->beginPass(m_sc->currentFrameRenderTarget(), QColor(0, 0, 0, 255), { 1.0f, 0 });
+    // Upload the decoded image texture and uniforms once.
+    QRhiResourceUpdateBatch *rub = nullptr;
+    if (m_imageMode && !m_texUploaded) {
+        rub = m_rhi->nextResourceUpdateBatch();
+        QRhiTextureSubresourceUploadDescription sub(
+            m_image.rgba16f.data(), quint32(m_image.rgba16f.size() * sizeof(uint16_t)));
+        QRhiTextureUploadEntry entry(0, 0, sub);
+        QRhiTextureUploadDescription desc(entry);
+        rub->uploadTexture(m_tex.get(), desc);
+
+        const float ubo[4] = { m_scale, m_splitX, 0.0f, 0.0f };
+        rub->updateDynamicBuffer(m_ubo.get(), 0, sizeof(ubo), ubo);
+        m_texUploaded = true;
+    }
+
+    cb->beginPass(m_sc->currentFrameRenderTarget(), QColor(0, 0, 0, 255), { 1.0f, 0 }, rub);
     cb->setGraphicsPipeline(m_ps.get());
     cb->setViewport({ 0, 0, float(outputSize.width()), float(outputSize.height()) });
     cb->setShaderResources();

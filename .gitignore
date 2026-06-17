@@ -2,3 +2,6 @@
 *.user
 .cache/
 compile_commands.json
+
+# generated/large test assets
+/samples/

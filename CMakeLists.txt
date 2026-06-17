@@ -14,6 +14,9 @@ pkg_check_modules(WaylandClient REQUIRED IMPORTED_TARGET wayland-client)
 find_program(WAYLAND_SCANNER NAMES wayland-scanner REQUIRED)
 pkg_get_variable(WAYLAND_PROTOCOLS_DIR wayland-protocols pkgdatadir)
 
+# libultrahdr (libuhdr) for decoding UltraHDR gain-map JPEGs.
+find_library(UHDR_LIB NAMES uhdr ultrahdr REQUIRED)
+
 # --- Generate the wp-color-management-v1 client protocol glue ---
 set(CM_XML "${WAYLAND_PROTOCOLS_DIR}/staging/color-management/color-management-v1.xml")
 set(CM_GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/wl-protocols")
@@ -35,6 +38,7 @@ add_executable(vantapaper
     src/main.cpp
     src/rhiwindow.cpp
     src/cm_tagging.cpp
+    src/hdr_image.cpp
     "${CM_SOURCE}"
     "${CM_HEADER}"
 )
@@ -46,6 +50,7 @@ target_link_libraries(vantapaper PRIVATE
     Qt6::GuiPrivate
     LayerShellQt::Interface
     PkgConfig::WaylandClient
+    ${UHDR_LIB}
 )
 
 # Compile the GLSL to .qsb and embed under :/shaders/<name>.qsb
@@ -57,4 +62,5 @@ qt6_add_shaders(vantapaper "vantapaper_shaders"
         shaders/fullscreen.vert
         shaders/testpattern.frag
         shaders/nitstest.frag
+        shaders/image.frag
 )

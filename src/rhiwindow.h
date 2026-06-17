@@ -4,6 +4,8 @@
 #include <rhi/qrhi.h>
 #include <memory>
 
+#include "hdr_image.h"
+
 // Minimal QRhi-driven QWindow that owns its own swapchain so we can request an
 // HDR (scRGB extended-linear) format -- something a plain QQuickWindow does not
 // expose. This is the foundation the rest of vantapaper will build on.
@@ -33,6 +35,16 @@ private:
     std::unique_ptr<QRhiRenderPassDescriptor> m_rp;
     std::unique_ptr<QRhiShaderResourceBindings> m_srb;
     std::unique_ptr<QRhiGraphicsPipeline> m_ps;
+
+    // Image mode (Fase 0b): decoded HDR image displayed via a textured quad.
+    bool m_imageMode = false;
+    HdrImage m_image;
+    std::unique_ptr<QRhiTexture> m_tex;
+    std::unique_ptr<QRhiSampler> m_sampler;
+    std::unique_ptr<QRhiBuffer> m_ubo;
+    bool m_texUploaded = false;
+    float m_scale = 2.5375f; // 203/80
+    float m_splitX = 0.5f;   // <=0 disables the SDR/HDR split
 
     bool m_initialized = false;
     bool m_hasSwapChain = false;
