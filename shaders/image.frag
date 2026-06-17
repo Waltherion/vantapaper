@@ -20,8 +20,9 @@ layout(binding = 1) uniform sampler2D tex;
 
 void main()
 {
-    vec2 uv = vec2(v_uv.x, 1.0 - v_uv.y); // flip Y so the image is upright
-    vec3 c = texture(tex, uv).rgb;
+    // Texture row 0 is the top of the image, and v_uv.y = 0 is the top of the
+    // screen here, so sample directly -- no Y flip (that turned images upside down).
+    vec3 c = texture(tex, v_uv).rgb;
 
     if (u.splitX > 0.0) {
         // thin black divider
