@@ -8,6 +8,7 @@
 #include <ultrahdr_api.h>
 #include <avif/avif.h>
 #include <lcms2.h>
+#include <jxl/decode.h>
 
 #include <algorithm>
 #include <cmath>
@@ -114,6 +115,39 @@ void bt2020ToBt709(float &r, float &g, float &b)
     r = R; g = G; b = B;
 }
 
+// Shared transfer model used by all HDR decoders.
+enum class Tf { SRGB, PQ, HLG, Linear };
+
+// Linearise one encoded channel to the fp16 convention (1.0 = 203 cd/m^2).
+float linChan(float c, Tf t)
+{
+    switch (t) {
+    case Tf::PQ:     return pqEotf(c) * 10000.0f / 203.0f;
+    case Tf::HLG:    return hlgSceneLinear(c) * 1000.0f / 203.0f;
+    case Tf::Linear: return c;
+    default:         return srgbEotf(c);
+    }
+}
+
+// Infer transfer + BT.2020-ness from an embedded ICC profile's description.
+// Real-world HDR (Lightroom etc.) tags colour this way rather than via CICP/nclx.
+Tf tfFromIcc(const void *icc, size_t size, bool &bt2020)
+{
+    Tf t = Tf::SRGB;
+    if (cmsHPROFILE p = cmsOpenProfileFromMem(icc, cmsUInt32Number(size))) {
+        char desc[256] = { 0 };
+        cmsGetProfileInfoASCII(p, cmsInfoDescription, "en", "US", desc, sizeof(desc));
+        cmsCloseProfile(p);
+        const QString d = QString::fromLatin1(desc).toLower();
+        if (d.contains("pq") || d.contains("2100") || d.contains("2084")) t = Tf::PQ;
+        else if (d.contains("hlg")) t = Tf::HLG;
+        else if (d.contains("linear")) t = Tf::Linear;
+        if (d.contains("2020") || d.contains("2100")) bt2020 = true;
+        std::fprintf(stderr, "vantapaper: ICC profile = '%s'\n", desc);
+    }
+    return t;
+}
+
 } // namespace
 
 HdrImage decodeAvif(const QString &path)
@@ -134,36 +168,20 @@ HdrImage decodeAvif(const QString &path)
     }
 
     const int depth = int(img->depth);
-    avifTransferCharacteristics tc = img->transferCharacteristics;
-    avifColorPrimaries prim = img->colorPrimaries;
-
-    // Real-world HDR (e.g. Lightroom) often leaves CICP "unspecified" and defines
-    // the colour space via an embedded ICC profile instead. Infer transfer and
-    // primaries from the ICC profile description in that case.
-    if ((tc == AVIF_TRANSFER_CHARACTERISTICS_UNSPECIFIED
-         || tc == AVIF_TRANSFER_CHARACTERISTICS_UNKNOWN)
-        && img->icc.size > 0) {
-        if (cmsHPROFILE p = cmsOpenProfileFromMem(img->icc.data, cmsUInt32Number(img->icc.size))) {
-            char desc[256] = { 0 };
-            cmsGetProfileInfoASCII(p, cmsInfoDescription, "en", "US", desc, sizeof(desc));
-            cmsCloseProfile(p);
-            const QString d = QString::fromLatin1(desc).toLower();
-            if (d.contains("pq") || d.contains("2100") || d.contains("2084"))
-                tc = AVIF_TRANSFER_CHARACTERISTICS_PQ;
-            else if (d.contains("hlg"))
-                tc = AVIF_TRANSFER_CHARACTERISTICS_HLG;
-            else if (d.contains("linear"))
-                tc = AVIF_TRANSFER_CHARACTERISTICS_LINEAR;
-            else
-                tc = AVIF_TRANSFER_CHARACTERISTICS_SRGB;
-            if (d.contains("2020") || d.contains("2100"))
-                prim = AVIF_COLOR_PRIMARIES_BT2020;
-            std::fprintf(stderr, "vantapaper: AVIF CICP unspecified; ICC='%s' -> transfer=%d\n",
-                         desc, int(tc));
-        }
+    bool bt2020 = (img->colorPrimaries == AVIF_COLOR_PRIMARIES_BT2020);
+    Tf tf = Tf::SRGB;
+    switch (img->transferCharacteristics) {
+    case AVIF_TRANSFER_CHARACTERISTICS_PQ:     tf = Tf::PQ; break;
+    case AVIF_TRANSFER_CHARACTERISTICS_HLG:    tf = Tf::HLG; break;
+    case AVIF_TRANSFER_CHARACTERISTICS_LINEAR: tf = Tf::Linear; break;
+    case AVIF_TRANSFER_CHARACTERISTICS_UNSPECIFIED:
+    case AVIF_TRANSFER_CHARACTERISTICS_UNKNOWN:
+        // CICP unspecified: define the colour space from the embedded ICC profile.
+        if (img->icc.size > 0)
+            tf = tfFromIcc(img->icc.data, img->icc.size, bt2020);
+        break;
+    default: break;
     }
-
-    const bool isBt2020 = (prim == AVIF_COLOR_PRIMARIES_BT2020);
 
     // A wallpaper never needs 45 MP. Downscale huge images before the per-pixel
     // linearisation so loading stays fast (these samples are 8256x5504).
@@ -196,25 +214,15 @@ HdrImage decodeAvif(const QString &path)
     result.h = h;
     result.rgba16f.resize(size_t(w) * h * 4);
 
-    // Linearise to the fp16 (1.0 = 203 cd/m^2) convention shared with the JPEG path.
-    auto linearize = [tc](float c) -> float {
-        switch (tc) {
-        case AVIF_TRANSFER_CHARACTERISTICS_PQ:  return pqEotf(c) * 10000.0f / 203.0f;
-        case AVIF_TRANSFER_CHARACTERISTICS_HLG: return hlgSceneLinear(c) * 1000.0f / 203.0f;
-        case AVIF_TRANSFER_CHARACTERISTICS_LINEAR: return c; // already linear (1.0 ~ ref white)
-        default:                                return srgbEotf(c); // sRGB/BT.709 SDR
-        }
-    };
-
     qfloat16 *dst = reinterpret_cast<qfloat16 *>(result.rgba16f.data());
     for (int y = 0; y < h; ++y) {
         const qfloat16 *src = reinterpret_cast<const qfloat16 *>(rgb.pixels + size_t(y) * rgb.rowBytes);
         for (int x = 0; x < w; ++x) {
-            float rr = linearize(float(src[x * 4 + 0]));
-            float gg = linearize(float(src[x * 4 + 1]));
-            float bb = linearize(float(src[x * 4 + 2]));
+            float rr = linChan(float(src[x * 4 + 0]), tf);
+            float gg = linChan(float(src[x * 4 + 1]), tf);
+            float bb = linChan(float(src[x * 4 + 2]), tf);
             const float aa = float(src[x * 4 + 3]);
-            if (isBt2020)
+            if (bt2020)
                 bt2020ToBt709(rr, gg, bb);
             const size_t o = (size_t(y) * w + x) * 4;
             dst[o + 0] = qfloat16(std::max(rr, 0.0f));
@@ -224,12 +232,117 @@ HdrImage decodeAvif(const QString &path)
         }
     }
 
-    std::fprintf(stderr, "vantapaper: decoded AVIF %dx%d depth=%d transfer=%d primaries=%s\n",
-                 w, h, depth, int(tc), isBt2020 ? "BT.2020" : "BT.709/other");
+    std::fprintf(stderr, "vantapaper: decoded AVIF %dx%d depth=%d transfer=%d bt2020=%d\n",
+                 w, h, depth, int(tf), int(bt2020));
 
     avifRGBImageFreePixels(&rgb);
     avifImageDestroy(img);
     avifDecoderDestroy(dec);
+    return result;
+}
+
+// --- JPEG-XL ----------------------------------------------------------------
+
+HdrImage decodeJxl(const QString &path)
+{
+    HdrImage result;
+
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) {
+        std::fprintf(stderr, "vantapaper: cannot open %s\n", qPrintable(path));
+        return result;
+    }
+    const QByteArray bytes = f.readAll();
+
+    JxlDecoder *dec = JxlDecoderCreate(nullptr);
+    if (!dec)
+        return result;
+    JxlDecoderSubscribeEvents(dec, JXL_DEC_BASIC_INFO | JXL_DEC_COLOR_ENCODING | JXL_DEC_FULL_IMAGE);
+    JxlDecoderSetInput(dec, reinterpret_cast<const uint8_t *>(bytes.constData()), size_t(bytes.size()));
+    JxlDecoderCloseInput(dec);
+
+    const JxlPixelFormat fmt = { 4, JXL_TYPE_FLOAT, JXL_NATIVE_ENDIAN, 0 };
+    Tf tf = Tf::SRGB;
+    bool bt2020 = false;
+    std::vector<float> pixels;
+    int w = 0, h = 0;
+    bool ok = false;
+
+    for (bool run = true; run; ) {
+        switch (JxlDecoderProcessInput(dec)) {
+        case JXL_DEC_ERROR:
+        case JXL_DEC_NEED_MORE_INPUT:
+            std::fprintf(stderr, "vantapaper: JXL decode error\n");
+            run = false;
+            break;
+        case JXL_DEC_SUCCESS:
+            ok = true;
+            run = false;
+            break;
+        case JXL_DEC_BASIC_INFO: {
+            JxlBasicInfo info;
+            if (JxlDecoderGetBasicInfo(dec, &info) == JXL_DEC_SUCCESS) {
+                w = int(info.xsize);
+                h = int(info.ysize);
+            }
+            break;
+        }
+        case JXL_DEC_COLOR_ENCODING: {
+            JxlColorEncoding enc;
+            if (JxlDecoderGetColorAsEncodedProfile(dec, JXL_COLOR_PROFILE_TARGET_DATA, &enc) == JXL_DEC_SUCCESS) {
+                switch (enc.transfer_function) {
+                case JXL_TRANSFER_FUNCTION_PQ:     tf = Tf::PQ; break;
+                case JXL_TRANSFER_FUNCTION_HLG:    tf = Tf::HLG; break;
+                case JXL_TRANSFER_FUNCTION_LINEAR: tf = Tf::Linear; break;
+                default:                           tf = Tf::SRGB; break;
+                }
+                bt2020 = (enc.primaries == JXL_PRIMARIES_2100);
+            } else {
+                size_t iccSize = 0;
+                if (JxlDecoderGetICCProfileSize(dec, JXL_COLOR_PROFILE_TARGET_DATA, &iccSize) == JXL_DEC_SUCCESS
+                    && iccSize > 0) {
+                    std::vector<uint8_t> icc(iccSize);
+                    if (JxlDecoderGetColorAsICCProfile(dec, JXL_COLOR_PROFILE_TARGET_DATA, icc.data(), iccSize)
+                        == JXL_DEC_SUCCESS)
+                        tf = tfFromIcc(icc.data(), iccSize, bt2020);
+                }
+            }
+            break;
+        }
+        case JXL_DEC_NEED_IMAGE_OUT_BUFFER: {
+            size_t need = 0;
+            JxlDecoderImageOutBufferSize(dec, &fmt, &need);
+            pixels.resize(need / sizeof(float));
+            JxlDecoderSetImageOutBuffer(dec, &fmt, pixels.data(), need);
+            break;
+        }
+        default:
+            break; // JXL_DEC_FULL_IMAGE etc. -> keep processing
+        }
+    }
+    JxlDecoderDestroy(dec);
+
+    if (!ok || w <= 0 || h <= 0 || pixels.size() < size_t(w) * h * 4) {
+        std::fprintf(stderr, "vantapaper: JXL decode produced no usable image\n");
+        return result;
+    }
+
+    result.w = w;
+    result.h = h;
+    result.rgba16f.resize(size_t(w) * h * 4);
+    qfloat16 *dst = reinterpret_cast<qfloat16 *>(result.rgba16f.data());
+    for (size_t i = 0; i < size_t(w) * h; ++i) {
+        float rr = linChan(pixels[i * 4 + 0], tf);
+        float gg = linChan(pixels[i * 4 + 1], tf);
+        float bb = linChan(pixels[i * 4 + 2], tf);
+        if (bt2020)
+            bt2020ToBt709(rr, gg, bb);
+        dst[i * 4 + 0] = qfloat16(std::max(rr, 0.0f));
+        dst[i * 4 + 1] = qfloat16(std::max(gg, 0.0f));
+        dst[i * 4 + 2] = qfloat16(std::max(bb, 0.0f));
+        dst[i * 4 + 3] = qfloat16(pixels[i * 4 + 3]);
+    }
+    std::fprintf(stderr, "vantapaper: decoded JXL %dx%d transfer=%d bt2020=%d\n", w, h, int(tf), int(bt2020));
     return result;
 }
 
@@ -272,6 +385,9 @@ HdrImage decodeImage(const QString &path)
 {
     if (path.endsWith(QStringLiteral(".avif"), Qt::CaseInsensitive))
         return decodeAvif(path);
+
+    if (path.endsWith(QStringLiteral(".jxl"), Qt::CaseInsensitive))
+        return decodeJxl(path);
 
     if (path.endsWith(QStringLiteral(".jpg"), Qt::CaseInsensitive)
         || path.endsWith(QStringLiteral(".jpeg"), Qt::CaseInsensitive)) {

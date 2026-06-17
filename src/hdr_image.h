@@ -26,5 +26,8 @@ HdrImage decodeUltraHdr(const QString &path);
 // content, with none of the gain-map inverse-tonemapping banding.
 HdrImage decodeAvif(const QString &path);
 
-// Pick the decoder by file extension (.avif -> AVIF, else UltraHDR JPEG).
+// Decode a JPEG-XL via libjxl (HDR PQ/HLG or SDR) into the same fp16 pipeline.
+HdrImage decodeJxl(const QString &path);
+
+// Pick the decoder by file extension (.avif, .jxl, .jpg -> HDR-aware; else QImage).
 HdrImage decodeImage(const QString &path);
