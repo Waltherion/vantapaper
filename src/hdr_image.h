@@ -19,3 +19,12 @@ struct HdrImage {
 // on failure (diagnostics go to stderr). This is the path mpv-based wallpapers
 // lack: it understands the HDR gain-map metadata baked into the JPEG.
 HdrImage decodeUltraHdr(const QString &path);
+
+// Decode an AVIF via libavif, linearising PQ/HLG/sRGB and converting BT.2020
+// primaries to BT.709, to the same fp16 linear (1.0 = 203 nits) convention.
+// AVIF carries true HDR pixels directly -- the right format for graphic/drawn
+// content, with none of the gain-map inverse-tonemapping banding.
+HdrImage decodeAvif(const QString &path);
+
+// Pick the decoder by file extension (.avif -> AVIF, else UltraHDR JPEG).
+HdrImage decodeImage(const QString &path);

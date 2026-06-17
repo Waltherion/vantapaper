@@ -17,6 +17,9 @@ pkg_get_variable(WAYLAND_PROTOCOLS_DIR wayland-protocols pkgdatadir)
 # libultrahdr (libuhdr) for decoding UltraHDR gain-map JPEGs.
 find_library(UHDR_LIB NAMES uhdr ultrahdr REQUIRED)
 
+# libavif for decoding AVIF (true HDR: PQ/HLG, 10/12-bit).
+pkg_check_modules(Avif REQUIRED IMPORTED_TARGET libavif)
+
 # --- Generate the wp-color-management-v1 client protocol glue ---
 set(CM_XML "${WAYLAND_PROTOCOLS_DIR}/staging/color-management/color-management-v1.xml")
 set(CM_GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/wl-protocols")
@@ -50,6 +53,7 @@ target_link_libraries(vantapaper PRIVATE
     Qt6::GuiPrivate
     LayerShellQt::Interface
     PkgConfig::WaylandClient
+    PkgConfig::Avif
     ${UHDR_LIB}
 )
 

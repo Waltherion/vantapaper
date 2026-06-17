@@ -2,9 +2,13 @@
 
 #include <QFile>
 #include <QString>
+#include <QtCore/qfloat16.h>
 
 #include <ultrahdr_api.h>
+#include <avif/avif.h>
 
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <cstdio>
 
@@ -67,4 +71,131 @@ HdrImage decodeUltraHdr(const QString &path)
 
     uhdr_release_decoder(dec);
     return result;
+}
+
+// --- AVIF -------------------------------------------------------------------
+
+namespace {
+
+// PQ (SMPTE ST 2084) EOTF: encoded [0,1] -> linear fraction of 10000 cd/m^2.
+float pqEotf(float e)
+{
+    const float m1 = 0.1593017578125f, m2 = 78.84375f;
+    const float c1 = 0.8359375f, c2 = 18.8515625f, c3 = 18.6875f;
+    e = std::clamp(e, 0.0f, 1.0f);
+    const float ep = std::pow(e, 1.0f / m2);
+    const float num = std::max(ep - c1, 0.0f);
+    const float den = c2 - c3 * ep;
+    return std::pow(num / den, 1.0f / m1);
+}
+
+// HLG inverse OETF (scene linear [0,1]); display OOTF approximated by peak scale.
+float hlgSceneLinear(float x)
+{
+    const float a = 0.17883277f, b = 0.28466892f, c = 0.55991073f;
+    x = std::clamp(x, 0.0f, 1.0f);
+    return x <= 0.5f ? (x * x) / 3.0f : (std::exp((x - c) / a) + b) / 12.0f;
+}
+
+float srgbEotf(float c)
+{
+    c = std::max(c, 0.0f);
+    return c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
+}
+
+// Linear BT.2020 -> linear BT.709 primaries.
+void bt2020ToBt709(float &r, float &g, float &b)
+{
+    const float R =  1.660491f * r - 0.587641f * g - 0.072850f * b;
+    const float G = -0.124550f * r + 1.132900f * g - 0.008349f * b;
+    const float B = -0.018151f * r - 0.100579f * g + 1.118730f * b;
+    r = R; g = G; b = B;
+}
+
+} // namespace
+
+HdrImage decodeAvif(const QString &path)
+{
+    HdrImage result;
+
+    avifDecoder *dec = avifDecoderCreate();
+    dec->maxThreads = 4;
+    avifImage *img = avifImageCreateEmpty();
+
+    const QByteArray pathBytes = path.toLocal8Bit();
+    avifResult r = avifDecoderReadFile(dec, img, pathBytes.constData());
+    if (r != AVIF_RESULT_OK) {
+        std::fprintf(stderr, "vantapaper: AVIF decode failed: %s\n", avifResultToString(r));
+        avifImageDestroy(img);
+        avifDecoderDestroy(dec);
+        return result;
+    }
+
+    const int depth = int(img->depth);
+    const avifTransferCharacteristics tc = img->transferCharacteristics;
+    const bool isBt2020 = (img->colorPrimaries == AVIF_COLOR_PRIMARIES_BT2020);
+
+    avifRGBImage rgb;
+    avifRGBImageSetDefaults(&rgb, img);
+    rgb.format = AVIF_RGB_FORMAT_RGBA;
+    rgb.depth = 16;
+    rgb.isFloat = AVIF_TRUE; // half-float, normalised [0,1] encoded values
+    rgb.maxThreads = 4;
+
+    if (avifRGBImageAllocatePixels(&rgb) != AVIF_RESULT_OK
+        || avifImageYUVToRGB(img, &rgb) != AVIF_RESULT_OK) {
+        std::fprintf(stderr, "vantapaper: AVIF YUV->RGB conversion failed\n");
+        avifRGBImageFreePixels(&rgb);
+        avifImageDestroy(img);
+        avifDecoderDestroy(dec);
+        return result;
+    }
+
+    const int w = int(rgb.width), h = int(rgb.height);
+    result.w = w;
+    result.h = h;
+    result.rgba16f.resize(size_t(w) * h * 4);
+
+    // Linearise to the fp16 (1.0 = 203 cd/m^2) convention shared with the JPEG path.
+    auto linearize = [tc](float c) -> float {
+        switch (tc) {
+        case AVIF_TRANSFER_CHARACTERISTICS_PQ:  return pqEotf(c) * 10000.0f / 203.0f;
+        case AVIF_TRANSFER_CHARACTERISTICS_HLG: return hlgSceneLinear(c) * 1000.0f / 203.0f;
+        case AVIF_TRANSFER_CHARACTERISTICS_LINEAR: return c; // already linear (1.0 ~ ref white)
+        default:                                return srgbEotf(c); // sRGB/BT.709 SDR
+        }
+    };
+
+    qfloat16 *dst = reinterpret_cast<qfloat16 *>(result.rgba16f.data());
+    for (int y = 0; y < h; ++y) {
+        const qfloat16 *src = reinterpret_cast<const qfloat16 *>(rgb.pixels + size_t(y) * rgb.rowBytes);
+        for (int x = 0; x < w; ++x) {
+            float rr = linearize(float(src[x * 4 + 0]));
+            float gg = linearize(float(src[x * 4 + 1]));
+            float bb = linearize(float(src[x * 4 + 2]));
+            const float aa = float(src[x * 4 + 3]);
+            if (isBt2020)
+                bt2020ToBt709(rr, gg, bb);
+            const size_t o = (size_t(y) * w + x) * 4;
+            dst[o + 0] = qfloat16(std::max(rr, 0.0f));
+            dst[o + 1] = qfloat16(std::max(gg, 0.0f));
+            dst[o + 2] = qfloat16(std::max(bb, 0.0f));
+            dst[o + 3] = qfloat16(aa);
+        }
+    }
+
+    std::fprintf(stderr, "vantapaper: decoded AVIF %dx%d depth=%d transfer=%d primaries=%s\n",
+                 w, h, depth, int(tc), isBt2020 ? "BT.2020" : "BT.709/other");
+
+    avifRGBImageFreePixels(&rgb);
+    avifImageDestroy(img);
+    avifDecoderDestroy(dec);
+    return result;
+}
+
+HdrImage decodeImage(const QString &path)
+{
+    if (path.endsWith(QStringLiteral(".avif"), Qt::CaseInsensitive))
+        return decodeAvif(path);
+    return decodeUltraHdr(path); // .jpg/.jpeg and fallback
 }

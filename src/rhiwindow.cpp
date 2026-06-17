@@ -81,7 +81,7 @@ void RhiWindow::init()
     // image mode; otherwise show a built-in test pattern.
     const QByteArray imagePath = qgetenv("VANTAPAPER_IMAGE");
     if (!imagePath.isEmpty()) {
-        m_image = decodeUltraHdr(QString::fromLocal8Bit(imagePath));
+        m_image = decodeImage(QString::fromLocal8Bit(imagePath));
         m_imageMode = m_image.valid();
         if (!m_imageMode)
             qWarning("vantapaper: image decode failed -> falling back to test pattern");
