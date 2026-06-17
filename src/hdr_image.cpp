@@ -3,6 +3,8 @@
 #include <QFile>
 #include <QString>
 #include <QImage>
+#include <QImageReader>
+#include <QColorSpace>
 #include <QtCore/qfloat16.h>
 
 #include <ultrahdr_api.h>
@@ -445,32 +447,64 @@ HdrImage decodeSdrImage(const QString &path)
 {
     HdrImage result;
 
+    // Big HDR PNG/TIFF exceed Qt's 256 MB default; we cap size at display time.
+    QImageReader::setAllocationLimit(0);
     QImage img(path);
     if (img.isNull()) {
         std::fprintf(stderr, "vantapaper: could not load image %s (unsupported format?)\n",
                      qPrintable(path));
         return result;
     }
-    img = img.convertToFormat(QImage::Format_RGBA8888);
+
+    // A 16-bit PNG/TIFF may carry an HDR transfer in its embedded ICC profile
+    // (e.g. "Rec. 2020 PQ"). Detect that and treat it as real HDR.
+    Tf tf = Tf::SRGB;
+    bool bt2020 = false;
+    const QByteArray icc = img.colorSpace().isValid() ? img.colorSpace().iccProfile() : QByteArray();
+    if (!icc.isEmpty())
+        tf = tfFromIcc(icc.constData(), size_t(icc.size()), bt2020);
 
     result.w = img.width();
     result.h = img.height();
     result.rgba16f.resize(size_t(result.w) * result.h * 4);
-
-    // sRGB -> linear; 1.0 = reference white. Black (0) stays 0 -> true black on
-    // the HDR surface, which is exactly what makes SDR wallpapers look right here.
     qfloat16 *dst = reinterpret_cast<qfloat16 *>(result.rgba16f.data());
-    for (int y = 0; y < result.h; ++y) {
-        const uchar *line = img.constScanLine(y);
-        for (int x = 0; x < result.w; ++x) {
-            const size_t o = (size_t(y) * result.w + x) * 4;
-            dst[o + 0] = qfloat16(srgbEotf(line[x * 4 + 0] / 255.0f));
-            dst[o + 1] = qfloat16(srgbEotf(line[x * 4 + 1] / 255.0f));
-            dst[o + 2] = qfloat16(srgbEotf(line[x * 4 + 2] / 255.0f));
-            dst[o + 3] = qfloat16(line[x * 4 + 3] / 255.0f);
+
+    if (tf != Tf::SRGB) {
+        // HDR image: keep the full 16-bit precision and linearise via the transfer.
+        img = img.convertToFormat(QImage::Format_RGBA64);
+        for (int y = 0; y < result.h; ++y) {
+            const quint16 *line = reinterpret_cast<const quint16 *>(img.constScanLine(y));
+            for (int x = 0; x < result.w; ++x) {
+                float rr = linChan(line[x * 4 + 0] / 65535.0f, tf);
+                float gg = linChan(line[x * 4 + 1] / 65535.0f, tf);
+                float bb = linChan(line[x * 4 + 2] / 65535.0f, tf);
+                const float aa = line[x * 4 + 3] / 65535.0f;
+                if (bt2020)
+                    bt2020ToBt709(rr, gg, bb);
+                const size_t o = (size_t(y) * result.w + x) * 4;
+                dst[o + 0] = qfloat16(std::max(rr, 0.0f));
+                dst[o + 1] = qfloat16(std::max(gg, 0.0f));
+                dst[o + 2] = qfloat16(std::max(bb, 0.0f));
+                dst[o + 3] = qfloat16(aa);
+            }
         }
+        std::fprintf(stderr, "vantapaper: loaded HDR image %dx%d via QImage (transfer=%d bt2020=%d)\n",
+                     result.w, result.h, int(tf), int(bt2020));
+    } else {
+        // SDR: sRGB -> linear; black (0) stays 0 -> true black on the HDR surface.
+        img = img.convertToFormat(QImage::Format_RGBA8888);
+        for (int y = 0; y < result.h; ++y) {
+            const uchar *line = img.constScanLine(y);
+            for (int x = 0; x < result.w; ++x) {
+                const size_t o = (size_t(y) * result.w + x) * 4;
+                dst[o + 0] = qfloat16(srgbEotf(line[x * 4 + 0] / 255.0f));
+                dst[o + 1] = qfloat16(srgbEotf(line[x * 4 + 1] / 255.0f));
+                dst[o + 2] = qfloat16(srgbEotf(line[x * 4 + 2] / 255.0f));
+                dst[o + 3] = qfloat16(line[x * 4 + 3] / 255.0f);
+            }
+        }
+        std::fprintf(stderr, "vantapaper: loaded SDR image %dx%d via QImage\n", result.w, result.h);
     }
-    std::fprintf(stderr, "vantapaper: loaded SDR image %dx%d via QImage\n", result.w, result.h);
     return result;
 }
 
