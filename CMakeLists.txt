@@ -20,6 +20,9 @@ find_library(UHDR_LIB NAMES uhdr ultrahdr REQUIRED)
 # libavif for decoding AVIF (true HDR: PQ/HLG, 10/12-bit).
 pkg_check_modules(Avif REQUIRED IMPORTED_TARGET libavif)
 
+# lcms2 to read embedded ICC profiles (Lightroom tags HDR via ICC, not CICP).
+pkg_check_modules(Lcms2 REQUIRED IMPORTED_TARGET lcms2)
+
 # --- Generate the wp-color-management-v1 client protocol glue ---
 set(CM_XML "${WAYLAND_PROTOCOLS_DIR}/staging/color-management/color-management-v1.xml")
 set(CM_GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/wl-protocols")
@@ -54,6 +57,7 @@ target_link_libraries(vantapaper PRIVATE
     LayerShellQt::Interface
     PkgConfig::WaylandClient
     PkgConfig::Avif
+    PkgConfig::Lcms2
     ${UHDR_LIB}
 )
 

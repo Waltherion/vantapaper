@@ -7,6 +7,7 @@
 
 #include <ultrahdr_api.h>
 #include <avif/avif.h>
+#include <lcms2.h>
 
 #include <algorithm>
 #include <cmath>
@@ -133,8 +134,46 @@ HdrImage decodeAvif(const QString &path)
     }
 
     const int depth = int(img->depth);
-    const avifTransferCharacteristics tc = img->transferCharacteristics;
-    const bool isBt2020 = (img->colorPrimaries == AVIF_COLOR_PRIMARIES_BT2020);
+    avifTransferCharacteristics tc = img->transferCharacteristics;
+    avifColorPrimaries prim = img->colorPrimaries;
+
+    // Real-world HDR (e.g. Lightroom) often leaves CICP "unspecified" and defines
+    // the colour space via an embedded ICC profile instead. Infer transfer and
+    // primaries from the ICC profile description in that case.
+    if ((tc == AVIF_TRANSFER_CHARACTERISTICS_UNSPECIFIED
+         || tc == AVIF_TRANSFER_CHARACTERISTICS_UNKNOWN)
+        && img->icc.size > 0) {
+        if (cmsHPROFILE p = cmsOpenProfileFromMem(img->icc.data, cmsUInt32Number(img->icc.size))) {
+            char desc[256] = { 0 };
+            cmsGetProfileInfoASCII(p, cmsInfoDescription, "en", "US", desc, sizeof(desc));
+            cmsCloseProfile(p);
+            const QString d = QString::fromLatin1(desc).toLower();
+            if (d.contains("pq") || d.contains("2100") || d.contains("2084"))
+                tc = AVIF_TRANSFER_CHARACTERISTICS_PQ;
+            else if (d.contains("hlg"))
+                tc = AVIF_TRANSFER_CHARACTERISTICS_HLG;
+            else if (d.contains("linear"))
+                tc = AVIF_TRANSFER_CHARACTERISTICS_LINEAR;
+            else
+                tc = AVIF_TRANSFER_CHARACTERISTICS_SRGB;
+            if (d.contains("2020") || d.contains("2100"))
+                prim = AVIF_COLOR_PRIMARIES_BT2020;
+            std::fprintf(stderr, "vantapaper: AVIF CICP unspecified; ICC='%s' -> transfer=%d\n",
+                         desc, int(tc));
+        }
+    }
+
+    const bool isBt2020 = (prim == AVIF_COLOR_PRIMARIES_BT2020);
+
+    // A wallpaper never needs 45 MP. Downscale huge images before the per-pixel
+    // linearisation so loading stays fast (these samples are 8256x5504).
+    const uint32_t kMaxDim = 3840;
+    if (img->width > kMaxDim || img->height > kMaxDim) {
+        const float s = float(kMaxDim) / float(std::max(img->width, img->height));
+        avifDiagnostics diag;
+        if (avifImageScale(img, uint32_t(img->width * s), uint32_t(img->height * s), &diag) != AVIF_RESULT_OK)
+            std::fprintf(stderr, "vantapaper: AVIF downscale failed (continuing at full size)\n");
+    }
 
     avifRGBImage rgb;
     avifRGBImageSetDefaults(&rgb, img);
