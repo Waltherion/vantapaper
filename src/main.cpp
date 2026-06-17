@@ -54,20 +54,10 @@ int main(int argc, char **argv)
         qFatal("vantapaper: failed to create Vulkan instance");
 
     // Wallpaper source: the active theme's folder (static path; `current` is a
-    // symlink Walther flips per theme). Config/override comes later.
+    // symlink Walther flips per theme). Rotation/transition come from the config.
     const QString dir = QDir::homePath() + QStringLiteral("/.config/themes/current/wallpapers");
 
-    // Rotation interval: VANTAPAPER_DURATION_SECS overrides (default 180 = 3 min).
-    bool okDur = false;
-    int dur = qEnvironmentVariable("VANTAPAPER_DURATION_SECS").toInt(&okDur);
-    if (!okDur || dur <= 0)
-        dur = 180;
-
-    // Default paused, matching the current wpaperd autostart (pauses on launch).
-    // VANTAPAPER_START_PLAYING=1 rotates immediately (handy for testing).
-    const bool startPaused = qEnvironmentVariable("VANTAPAPER_START_PLAYING") != QLatin1String("1");
-
-    Daemon daemon(&inst, dir, dur, startPaused);
+    Daemon daemon(&inst, dir);
     daemon.start();
 
     return app.exec();

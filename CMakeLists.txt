@@ -79,7 +79,5 @@ qt6_add_shaders(vantapaper "vantapaper_shaders"
     PREFIX "/shaders"
     FILES
         shaders/fullscreen.vert
-        shaders/testpattern.frag
-        shaders/nitstest.frag
         shaders/image.frag
 )

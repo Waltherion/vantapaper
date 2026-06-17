@@ -32,23 +32,50 @@ QString WallpaperOutput::screenName() const
     return m_screen ? m_screen->name() : QString();
 }
 
-void WallpaperOutput::setImage(std::shared_ptr<const HdrImage> image)
+void WallpaperOutput::resizeTexture(int idx, const HdrImage &img)
 {
-    m_image = std::move(image);
-    m_texUploaded = false;
-
-    // Resize the texture in place if the new image has different dimensions
-    // (keeps the shader resource bindings valid since the QRhiTexture* is reused).
-    if (m_initialized && m_tex && m_image && m_image->valid()) {
-        const QSize want(m_image->w, m_image->h);
-        if (m_tex->pixelSize() != want) {
-            m_tex->destroy();
-            m_tex->setPixelSize(want);
-            m_tex->create();
-        }
+    const QSize want(img.w, img.h);
+    if (m_tex[idx] && m_tex[idx]->pixelSize() != want) {
+        m_tex[idx]->destroy();
+        m_tex[idx]->setPixelSize(want);
+        m_tex[idx]->create();
     }
-    if (m_initialized)
+}
+
+void WallpaperOutput::setImage(std::shared_ptr<const HdrImage> image, const Transition &trans)
+{
+    if (!image || !image->valid())
+        return;
+    m_incoming = std::move(image);
+
+    if (!m_initialized) {
+        // First image arrives before the surface exists; shown in init/render.
+        m_incomingDirty = true;
+        m_transActive = false;
+        return;
+    }
+
+    if (!m_firstShown) {
+        resizeTexture(m_curIndex, *m_incoming);
+        m_incomingDirty = true;
+        m_transActive = false;
         requestUpdate();
+        return;
+    }
+
+    // Cross-transition: upload the new image into the other texture, make it current.
+    m_curIndex = 1 - m_curIndex;
+    resizeTexture(m_curIndex, *m_incoming);
+    m_incomingDirty = true;
+
+    m_trans = trans;
+    if (trans.type < 0 || trans.durationMs <= 0) {
+        m_transActive = false;
+    } else {
+        m_transActive = true;
+        m_transClock.restart();
+    }
+    requestUpdate();
 }
 
 void WallpaperOutput::init()
@@ -66,7 +93,6 @@ void WallpaperOutput::init()
 
     const QString screenName = m_screen ? m_screen->name() : QStringLiteral("?");
 
-    // Swapchain colorspace; VANTAPAPER_FORMAT overrides for debugging.
     const QByteArray want = qgetenv("VANTAPAPER_FORMAT").toLower();
     auto trySet = [&](QRhiSwapChain::Format f, const char *name) -> bool {
         if (m_sc->isFormatSupported(f)) {
@@ -101,24 +127,28 @@ void WallpaperOutput::init()
     bool okScale = false;
     const float s = qEnvironmentVariable("VANTAPAPER_SCALE").toFloat(&okScale);
     if (okScale) m_scale = s;
-    if (qEnvironmentVariableIsSet("VANTAPAPER_SPLIT"))
-        m_splitX = qEnvironmentVariable("VANTAPAPER_SPLIT").toFloat();
 
-    // Texture sized to the current image, or a 1x1 placeholder until one arrives.
-    const QSize texSize = (m_image && m_image->valid()) ? QSize(m_image->w, m_image->h) : QSize(1, 1);
-    m_tex.reset(m_rhi->newTexture(QRhiTexture::RGBA16F, texSize));
-    m_tex->create();
+    // Two textures: tex[0] sized to the current image (or 1x1 placeholder), tex[1] 1x1.
+    const QSize firstSize = (m_incoming && m_incoming->valid()) ? QSize(m_incoming->w, m_incoming->h)
+                                                                : QSize(1, 1);
+    m_tex[0].reset(m_rhi->newTexture(QRhiTexture::RGBA16F, firstSize));
+    m_tex[0]->create();
+    m_tex[1].reset(m_rhi->newTexture(QRhiTexture::RGBA16F, QSize(1, 1)));
+    m_tex[1]->create();
+
     m_sampler.reset(m_rhi->newSampler(QRhiSampler::Linear, QRhiSampler::Linear, QRhiSampler::None,
                                       QRhiSampler::ClampToEdge, QRhiSampler::ClampToEdge));
     m_sampler->create();
-    m_ubo.reset(m_rhi->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, 4 * sizeof(float)));
+    m_ubo.reset(m_rhi->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, 8 * sizeof(float)));
     m_ubo->create();
 
     m_srb.reset(m_rhi->newShaderResourceBindings());
     m_srb->setBindings({
         QRhiShaderResourceBinding::uniformBuffer(0, QRhiShaderResourceBinding::FragmentStage, m_ubo.get()),
         QRhiShaderResourceBinding::sampledTexture(1, QRhiShaderResourceBinding::FragmentStage,
-                                                  m_tex.get(), m_sampler.get())
+                                                  m_tex[0].get(), m_sampler.get()),
+        QRhiShaderResourceBinding::sampledTexture(2, QRhiShaderResourceBinding::FragmentStage,
+                                                  m_tex[1].get(), m_sampler.get())
     });
     m_srb->create();
 
@@ -134,6 +164,7 @@ void WallpaperOutput::init()
     if (!m_ps->create())
         qFatal("vantapaper: failed to create image pipeline");
 
+    m_curIndex = 0;
     m_initialized = true;
 }
 
@@ -175,24 +206,38 @@ void WallpaperOutput::render()
 
     QRhiCommandBuffer *cb = m_sc->currentFrameCommandBuffer();
     const QSize outputSize = m_sc->currentPixelSize();
-    const bool haveImage = m_image && m_image->valid();
 
-    QRhiResourceUpdateBatch *rub = nullptr;
-    if (haveImage && !m_texUploaded) {
-        rub = m_rhi->nextResourceUpdateBatch();
+    QRhiResourceUpdateBatch *rub = m_rhi->nextResourceUpdateBatch();
+
+    if (m_incomingDirty && m_incoming && m_incoming->valid()) {
         QRhiTextureSubresourceUploadDescription sub(
-            m_image->rgba16f.data(), quint32(m_image->rgba16f.size() * sizeof(uint16_t)));
+            m_incoming->rgba16f.data(), quint32(m_incoming->rgba16f.size() * sizeof(uint16_t)));
         QRhiTextureUploadEntry entry(0, 0, sub);
         QRhiTextureUploadDescription desc(entry);
-        rub->uploadTexture(m_tex.get(), desc);
-
-        const float ubo[4] = { m_scale, m_splitX, 0.0f, 0.0f };
-        rub->updateDynamicBuffer(m_ubo.get(), 0, sizeof(ubo), ubo);
-        m_texUploaded = true;
+        rub->uploadTexture(m_tex[m_curIndex].get(), desc);
+        m_incomingDirty = false;
+        m_firstShown = true;
     }
 
+    float progress = 1.0f;
+    if (m_transActive) {
+        progress = float(m_transClock.elapsed()) / float(m_trans.durationMs);
+        if (progress >= 1.0f) {
+            progress = 1.0f;
+            m_transActive = false;
+        }
+    }
+
+    const float aspect = outputSize.height() > 0
+        ? float(outputSize.width()) / float(outputSize.height()) : 1.0f;
+    const float ubo[8] = {
+        m_scale, progress, float(m_trans.type), float(m_curIndex),
+        m_trans.cx, m_trans.cy, m_trans.angle, aspect
+    };
+    rub->updateDynamicBuffer(m_ubo.get(), 0, sizeof(ubo), ubo);
+
     cb->beginPass(m_sc->currentFrameRenderTarget(), QColor(0, 0, 0, 255), { 1.0f, 0 }, rub);
-    if (haveImage) {
+    if (m_firstShown) {
         cb->setGraphicsPipeline(m_ps.get());
         cb->setViewport({ 0, 0, float(outputSize.width()), float(outputSize.height()) });
         cb->setShaderResources();
@@ -201,6 +246,9 @@ void WallpaperOutput::render()
     cb->endPass();
 
     m_rhi->endFrame(m_sc.get());
+
+    if (m_transActive)
+        requestUpdate(); // keep animating
 }
 
 void WallpaperOutput::exposeEvent(QExposeEvent *)
@@ -215,9 +263,6 @@ void WallpaperOutput::exposeEvent(QExposeEvent *)
     if (isExposed() && m_initialized && m_hasSwapChain && !surfaceSize.isEmpty()) {
         render();
 
-        // After the first frame the native wl_surface exists; tag it Windows-scRGB
-        // (HDR outputs only), then render once more so the next commit applies the
-        // double-buffered color-management image description.
         if (!m_tagged) {
             m_tagged = true;
             if (m_hdrActive) {
