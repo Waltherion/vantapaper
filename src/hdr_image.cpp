@@ -9,6 +9,7 @@
 #include <avif/avif.h>
 #include <lcms2.h>
 #include <jxl/decode.h>
+#include <libheif/heif.h>
 
 #include <algorithm>
 #include <cmath>
@@ -346,6 +347,98 @@ HdrImage decodeJxl(const QString &path)
     return result;
 }
 
+// --- HEIC / HEIF ------------------------------------------------------------
+
+HdrImage decodeHeic(const QString &path)
+{
+    HdrImage result;
+
+    heif_context *ctx = heif_context_alloc();
+    if (!ctx)
+        return result;
+
+    const QByteArray pathBytes = path.toLocal8Bit();
+    heif_error err = heif_context_read_from_file(ctx, pathBytes.constData(), nullptr);
+    if (err.code != heif_error_Ok) {
+        std::fprintf(stderr, "vantapaper: HEIC read failed: %s\n", err.message);
+        heif_context_free(ctx);
+        return result;
+    }
+
+    heif_image_handle *handle = nullptr;
+    if (heif_context_get_primary_image_handle(ctx, &handle).code != heif_error_Ok || !handle) {
+        heif_context_free(ctx);
+        return result;
+    }
+
+    int bpp = heif_image_handle_get_luma_bits_per_pixel(handle);
+    if (bpp <= 0 || bpp > 16)
+        bpp = 16;
+
+    // Colour space from nclx (CICP), else from the embedded ICC profile.
+    Tf tf = Tf::SRGB;
+    bool bt2020 = false;
+    heif_color_profile_nclx *nclx = nullptr;
+    if (heif_image_handle_get_nclx_color_profile(handle, &nclx).code == heif_error_Ok && nclx) {
+        if (nclx->transfer_characteristics == heif_transfer_characteristic_ITU_R_BT_2100_0_PQ)
+            tf = Tf::PQ;
+        else if (nclx->transfer_characteristics == heif_transfer_characteristic_ITU_R_BT_2100_0_HLG)
+            tf = Tf::HLG;
+        bt2020 = (nclx->color_primaries == heif_color_primaries_ITU_R_BT_2020_2_and_2100_0);
+        heif_nclx_color_profile_free(nclx);
+    } else if (size_t iccSize = heif_image_handle_get_raw_color_profile_size(handle)) {
+        std::vector<uint8_t> icc(iccSize);
+        if (heif_image_handle_get_raw_color_profile(handle, icc.data()).code == heif_error_Ok)
+            tf = tfFromIcc(icc.data(), iccSize, bt2020);
+    }
+
+    heif_image *img = nullptr;
+    err = heif_decode_image(handle, &img, heif_colorspace_RGB,
+                            heif_chroma_interleaved_RRGGBBAA_LE, nullptr);
+    if (err.code != heif_error_Ok || !img) {
+        std::fprintf(stderr, "vantapaper: HEIC decode failed: %s\n", err.message);
+        heif_image_handle_release(handle);
+        heif_context_free(ctx);
+        return result;
+    }
+
+    const int w = heif_image_get_width(img, heif_channel_interleaved);
+    const int h = heif_image_get_height(img, heif_channel_interleaved);
+    int stride = 0;
+    const uint8_t *plane = heif_image_get_plane_readonly(img, heif_channel_interleaved, &stride);
+
+    if (w > 0 && h > 0 && plane) {
+        const float maxv = float((1u << bpp) - 1u); // samples are right-aligned in 16-bit LE
+        result.w = w;
+        result.h = h;
+        result.rgba16f.resize(size_t(w) * h * 4);
+        qfloat16 *dst = reinterpret_cast<qfloat16 *>(result.rgba16f.data());
+        for (int y = 0; y < h; ++y) {
+            const uint16_t *row = reinterpret_cast<const uint16_t *>(plane + size_t(y) * stride);
+            for (int x = 0; x < w; ++x) {
+                float rr = linChan(row[x * 4 + 0] / maxv, tf);
+                float gg = linChan(row[x * 4 + 1] / maxv, tf);
+                float bb = linChan(row[x * 4 + 2] / maxv, tf);
+                const float aa = row[x * 4 + 3] / maxv;
+                if (bt2020)
+                    bt2020ToBt709(rr, gg, bb);
+                const size_t o = (size_t(y) * w + x) * 4;
+                dst[o + 0] = qfloat16(std::max(rr, 0.0f));
+                dst[o + 1] = qfloat16(std::max(gg, 0.0f));
+                dst[o + 2] = qfloat16(std::max(bb, 0.0f));
+                dst[o + 3] = qfloat16(aa);
+            }
+        }
+        std::fprintf(stderr, "vantapaper: decoded HEIC %dx%d bpp=%d transfer=%d bt2020=%d\n",
+                     w, h, bpp, int(tf), int(bt2020));
+    }
+
+    heif_image_release(img);
+    heif_image_handle_release(handle);
+    heif_context_free(ctx);
+    return result;
+}
+
 // --- General SDR images (PNG/JPEG/WebP/... via Qt's image plugins) ----------
 
 HdrImage decodeSdrImage(const QString &path)
@@ -388,6 +481,10 @@ HdrImage decodeImage(const QString &path)
 
     if (path.endsWith(QStringLiteral(".jxl"), Qt::CaseInsensitive))
         return decodeJxl(path);
+
+    if (path.endsWith(QStringLiteral(".heic"), Qt::CaseInsensitive)
+        || path.endsWith(QStringLiteral(".heif"), Qt::CaseInsensitive))
+        return decodeHeic(path);
 
     if (path.endsWith(QStringLiteral(".jpg"), Qt::CaseInsensitive)
         || path.endsWith(QStringLiteral(".jpeg"), Qt::CaseInsensitive)) {

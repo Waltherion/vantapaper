@@ -29,5 +29,8 @@ HdrImage decodeAvif(const QString &path);
 // Decode a JPEG-XL via libjxl (HDR PQ/HLG or SDR) into the same fp16 pipeline.
 HdrImage decodeJxl(const QString &path);
 
+// Decode a HEIC/HEIF via libheif (HDR PQ/HLG, 10/12-bit, or SDR).
+HdrImage decodeHeic(const QString &path);
+
 // Pick the decoder by file extension (.avif, .jxl, .jpg -> HDR-aware; else QImage).
 HdrImage decodeImage(const QString &path);
