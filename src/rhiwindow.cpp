@@ -27,6 +27,11 @@ WallpaperOutput::WallpaperOutput(QVulkanInstance *inst, QScreen *screen)
 
 WallpaperOutput::~WallpaperOutput() = default;
 
+QString WallpaperOutput::screenName() const
+{
+    return m_screen ? m_screen->name() : QString();
+}
+
 void WallpaperOutput::setImage(std::shared_ptr<const HdrImage> image)
 {
     m_image = std::move(image);

@@ -25,6 +25,8 @@ public:
     // surface is initialized; the texture is (re)uploaded on the next frame.
     void setImage(std::shared_ptr<const HdrImage> image);
 
+    QString screenName() const;
+
 protected:
     void exposeEvent(QExposeEvent *) override;
     bool event(QEvent *) override;
