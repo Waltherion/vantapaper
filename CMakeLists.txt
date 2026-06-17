@@ -51,6 +51,7 @@ add_executable(vantapaper
     src/rhiwindow.cpp
     src/cm_tagging.cpp
     src/hdr_image.cpp
+    src/playlist.cpp
     "${CM_SOURCE}"
     "${CM_HEADER}"
 )
