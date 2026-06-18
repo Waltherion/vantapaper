@@ -59,6 +59,7 @@ HdrImage decodeUltraHdr(const QString &path)
         if (out && out->fmt == UHDR_IMG_FMT_64bppRGBAHalfFloat && out->planes[UHDR_PLANE_PACKED]) {
             result.w = int(out->w);
             result.h = int(out->h);
+            result.hdr = true; // gain-map JPEG is HDR
             result.rgba16f.resize(size_t(out->w) * out->h * 4);
 
             const uint16_t *src = static_cast<const uint16_t *>(out->planes[UHDR_PLANE_PACKED]);
@@ -235,6 +236,7 @@ HdrImage decodeAvif(const QString &path)
         }
     }
 
+    result.hdr = (tf != Tf::SRGB);
     std::fprintf(stderr, "vantapaper: decoded AVIF %dx%d depth=%d transfer=%d bt2020=%d\n",
                  w, h, depth, int(tf), int(bt2020));
 
@@ -345,6 +347,7 @@ HdrImage decodeJxl(const QString &path)
         dst[i * 4 + 2] = qfloat16(std::max(bb, 0.0f));
         dst[i * 4 + 3] = qfloat16(pixels[i * 4 + 3]);
     }
+    result.hdr = (tf != Tf::SRGB);
     std::fprintf(stderr, "vantapaper: decoded JXL %dx%d transfer=%d bt2020=%d\n", w, h, int(tf), int(bt2020));
     return result;
 }
@@ -431,6 +434,7 @@ HdrImage decodeHeic(const QString &path)
                 dst[o + 3] = qfloat16(aa);
             }
         }
+        result.hdr = (tf != Tf::SRGB);
         std::fprintf(stderr, "vantapaper: decoded HEIC %dx%d bpp=%d transfer=%d bt2020=%d\n",
                      w, h, bpp, int(tf), int(bt2020));
     }
@@ -518,6 +522,7 @@ HdrImage decodeSdrImage(const QString &path)
 
     result.w = img.width();
     result.h = img.height();
+    result.hdr = (tf != Tf::SRGB);
     result.rgba16f.resize(size_t(result.w) * result.h * 4);
     qfloat16 *dst = reinterpret_cast<qfloat16 *>(result.rgba16f.data());
 

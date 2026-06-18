@@ -7,6 +7,7 @@
 
 #include "hdr_image.h"
 #include "transition.h"
+#include "cm_tagging.h"
 
 class QScreen;
 
@@ -24,6 +25,10 @@ public:
     // Show this image, playing `trans` (ignored for the very first image). The
     // HdrImage is shared so one decode can feed every output.
     void setImage(std::shared_ptr<const HdrImage> image, const Transition &trans);
+
+    // Tell this output whether its monitor is currently in HDR or SDR mode, so it
+    // can tag + render appropriately. Driven by the daemon's per-output detection.
+    void setHdrMode(bool hdr);
 
     QString screenName() const;
 
@@ -62,8 +67,13 @@ private:
 
     float m_scale = 2.5375f; // 203/80
 
+    std::unique_ptr<cm::SurfaceColor> m_color;
+    bool m_colorApplied = false;
+
     bool m_initialized = false;
     bool m_hasSwapChain = false;
     bool m_hdrActive = false;
-    bool m_tagged = false;
+
+    bool m_hdrMode = true;       // monitor currently in HDR mode?
+    bool m_hdrModeKnown = false; // has the daemon told us yet?
 };

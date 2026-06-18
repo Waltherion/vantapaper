@@ -32,6 +32,26 @@ QString WallpaperOutput::screenName() const
     return m_screen ? m_screen->name() : QString();
 }
 
+void WallpaperOutput::setHdrMode(bool hdr)
+{
+    if (m_hdrModeKnown && hdr == m_hdrMode)
+        return;
+    m_hdrModeKnown = true;
+    m_hdrMode = hdr;
+    qInfo("vantapaper[%s]: monitor is %s mode",
+          qPrintable(m_screen ? m_screen->name() : QStringLiteral("?")), hdr ? "HDR" : "SDR");
+
+    // Re-tag the surface (HDR scRGB vs SDR sRGB); the shader's SDR branch follows
+    // the same flag. The new image description applies on the next committed frame.
+    if (m_color && m_color->valid()) {
+        if (m_hdrMode)
+            m_color->setWindowsScrgb();
+        else
+            m_color->setSrgb();
+        requestUpdate();
+    }
+}
+
 void WallpaperOutput::resizeTexture(int idx, const HdrImage &img)
 {
     const QSize want(img.w, img.h);
@@ -139,7 +159,7 @@ void WallpaperOutput::init()
     m_sampler.reset(m_rhi->newSampler(QRhiSampler::Linear, QRhiSampler::Linear, QRhiSampler::None,
                                       QRhiSampler::ClampToEdge, QRhiSampler::ClampToEdge));
     m_sampler->create();
-    m_ubo.reset(m_rhi->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, 8 * sizeof(float)));
+    m_ubo.reset(m_rhi->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, 12 * sizeof(float)));
     m_ubo->create();
 
     m_srb.reset(m_rhi->newShaderResourceBindings());
@@ -230,9 +250,11 @@ void WallpaperOutput::render()
 
     const float aspect = outputSize.height() > 0
         ? float(outputSize.width()) / float(outputSize.height()) : 1.0f;
-    const float ubo[8] = {
+    const float imageHdr = (m_incoming && m_incoming->hdr) ? 1.0f : 0.0f;
+    const float ubo[12] = {
         m_scale, progress, float(m_trans.type), float(m_curIndex),
-        m_trans.cx, m_trans.cy, m_trans.angle, aspect
+        m_trans.cx, m_trans.cy, m_trans.angle, aspect,
+        m_hdrMode ? 0.0f : 1.0f, imageHdr, 0.0f, 0.0f
     };
     rub->updateDynamicBuffer(m_ubo.get(), 0, sizeof(ubo), ubo);
 
@@ -263,15 +285,16 @@ void WallpaperOutput::exposeEvent(QExposeEvent *)
     if (isExposed() && m_initialized && m_hasSwapChain && !surfaceSize.isEmpty()) {
         render();
 
-        if (!m_tagged) {
-            m_tagged = true;
-            if (m_hdrActive) {
-                const bool tagOk = cm::tagWindowWindowsScrgb(this);
-                qInfo("vantapaper[%s]: windows-scRGB tag %s",
-                      qPrintable(m_screen ? m_screen->name() : QStringLiteral("?")),
-                      tagOk ? "ok" : "FAILED");
+        if (!m_colorApplied) {
+            m_colorApplied = true;
+            m_color = std::make_unique<cm::SurfaceColor>(this);
+            if (m_color->valid()) {
+                if (m_hdrMode)
+                    m_color->setWindowsScrgb();
+                else
+                    m_color->setSrgb();
             }
-            render();
+            render(); // commit applies the image description
         }
     }
 

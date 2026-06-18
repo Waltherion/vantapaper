@@ -1,22 +1,37 @@
 #pragma once
 
 class QWindow;
+struct wl_display;
+struct wl_event_queue;
+struct wp_color_manager_v1;
+struct wp_color_management_surface_v1;
+struct wp_image_description_v1;
 
 namespace cm {
 
-// Tag the window's underlying wl_surface as "Windows-scRGB" via the
-// wp-color-management-v1 protocol: sRGB primaries, extended-linear transfer,
-// where pixel value 0.0 maps to 0 cd/m² (true black) and 1.0 to 80 cd/m².
-//
-// This is the whole point of vantapaper: Qt's Vulkan path never attaches a
-// color-management image description to the surface, so Hyprland treats it as
-// SDR and lifts the black floor (sdrbrightness). Tagging it ourselves makes the
-// compositor pass it through as real HDR with true blacks -- exactly what
-// Chromium does and mpv-based wallpapers cannot.
-//
-// Must be called after the window has a native wl_surface (i.e. once exposed).
-// Returns true on success. The created protocol objects are deliberately kept
-// alive for the process lifetime.
-bool tagWindowWindowsScrgb(QWindow *window);
+// Persistent colour-management handle for one window's wl_surface. Create it once
+// the surface exists, then switch the surface's image description as the monitor
+// flips between HDR and SDR. Qt's Vulkan path never tags the surface itself, so we
+// drive wp-color-management-v1 directly here.
+class SurfaceColor
+{
+public:
+    explicit SurfaceColor(QWindow *window);
+    ~SurfaceColor();
+
+    bool valid() const { return m_manager != nullptr && m_cmSurface != nullptr; }
+
+    void setWindowsScrgb(); // HDR: linear scRGB, true blacks + HDR headroom
+    void setSrgb();         // SDR: plain sRGB (relative)
+
+private:
+    void applyDescription(wp_image_description_v1 *desc, const char *label);
+
+    wl_display *m_display = nullptr;
+    wl_event_queue *m_queue = nullptr;
+    wp_color_manager_v1 *m_manager = nullptr;
+    wp_color_management_surface_v1 *m_cmSurface = nullptr;
+    bool m_supportsScrgb = false;
+};
 
 } // namespace cm

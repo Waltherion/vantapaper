@@ -11,6 +11,7 @@ struct HdrImage {
     int w = 0;
     int h = 0;
     std::vector<uint16_t> rgba16f; // w*h*4 halfs (raw fp16 bits)
+    bool hdr = false;              // true HDR content (PQ/HLG/gain-map) vs SDR
 
     bool valid() const { return w > 0 && h > 0 && rgba16f.size() == size_t(w) * h * 4; }
 };

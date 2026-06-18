@@ -31,6 +31,7 @@ public:
 private:
     void loadConfig();
     void createOutputs();
+    void pollHdrStates(); // ask Hyprland for each monitor's HDR/SDR preset
     void showCurrent();
     void updateStateLinks(const QString &imagePath);
     Transition pickTransition() const;
@@ -55,5 +56,6 @@ private:
     Playlist m_playlist;
     std::vector<std::unique_ptr<WallpaperOutput>> m_outputs;
     QTimer m_timer;
+    QTimer m_hdrPoll;
     QLocalServer *m_server = nullptr;
 };

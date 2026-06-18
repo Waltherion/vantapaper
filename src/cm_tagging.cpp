@@ -81,72 +81,85 @@ wl_surface *waylandSurface(QWindow *window)
 
 namespace cm {
 
-bool tagWindowWindowsScrgb(QWindow *window)
+SurfaceColor::SurfaceColor(QWindow *window)
 {
-    wl_display *display = waylandDisplay();
+    m_display = waylandDisplay();
     wl_surface *surface = waylandSurface(window);
-    if (!display || !surface) {
+    if (!m_display || !surface) {
         std::fprintf(stderr, "vantapaper: no native wl_display/wl_surface (not on Wayland?)\n");
-        return false;
+        return;
     }
 
     ManagerState mgr;
-    wl_registry *registry = wl_display_get_registry(display);
+    wl_registry *registry = wl_display_get_registry(m_display);
 
-    // Dedicated event queue: our synchronous roundtrips must dispatch ONLY our own
-    // color-management objects, never Qt's surfaces. Otherwise a roundtrip inside
-    // exposeEvent re-enters Qt's event loop and a second output's tagging runs
-    // nested inside the first -- leaving the first stuck (only one surface tagged).
-    // Objects bound from this registry inherit its queue.
-    wl_event_queue *queue = wl_display_create_queue(display);
-    wl_proxy_set_queue(reinterpret_cast<wl_proxy *>(registry), queue);
+    // Dedicated event queue: our synchronous roundtrips dispatch ONLY our own
+    // color-management objects, never Qt's surfaces -- otherwise a roundtrip
+    // re-enters Qt's event loop. Objects bound from this registry inherit the queue.
+    m_queue = wl_display_create_queue(m_display);
+    wl_proxy_set_queue(reinterpret_cast<wl_proxy *>(registry), m_queue);
 
     wl_registry_add_listener(registry, &kRegistryListener, &mgr);
-    wl_display_roundtrip_queue(display, queue); // resolve globals -> bind manager
+    wl_display_roundtrip_queue(m_display, m_queue); // resolve globals -> bind manager
     if (!mgr.manager) {
         std::fprintf(stderr, "vantapaper: compositor has no wp_color_manager_v1\n");
-        return false;
+        return;
     }
+    m_manager = mgr.manager;
 
-    wp_color_manager_v1_add_listener(mgr.manager, &kManagerListener, &mgr);
-    while (!mgr.done) { // collect all supported_* events until 'done'
-        if (wl_display_roundtrip_queue(display, queue) < 0)
+    wp_color_manager_v1_add_listener(m_manager, &kManagerListener, &mgr);
+    while (!mgr.done) {
+        if (wl_display_roundtrip_queue(m_display, m_queue) < 0)
             break;
     }
-    if (!mgr.supportsWindowsScrgb) {
-        std::fprintf(stderr, "vantapaper: compositor lacks the windows_scrgb feature\n");
-        return false;
-    }
+    m_supportsScrgb = mgr.supportsWindowsScrgb;
 
-    wp_image_description_v1 *desc = wp_color_manager_v1_create_windows_scrgb(mgr.manager);
+    m_cmSurface = wp_color_manager_v1_get_surface(m_manager, surface);
+}
+
+SurfaceColor::~SurfaceColor() = default; // objects live for the surface's lifetime
+
+void SurfaceColor::applyDescription(wp_image_description_v1 *desc, const char *label)
+{
+    if (!desc)
+        return;
     ImageState img;
     wp_image_description_v1_add_listener(desc, &kImageListener, &img);
     while (!img.ready && !img.failed) {
-        if (wl_display_roundtrip_queue(display, queue) < 0)
+        if (wl_display_roundtrip_queue(m_display, m_queue) < 0)
             break;
     }
     if (!img.ready) {
-        std::fprintf(stderr, "vantapaper: Windows-scRGB image description never became ready\n");
-        return false;
+        std::fprintf(stderr, "vantapaper: image description (%s) never became ready\n", label);
+        wp_image_description_v1_destroy(desc);
+        return;
     }
-
-    wp_color_management_surface_v1 *cmSurface =
-        wp_color_manager_v1_get_surface(mgr.manager, surface);
     wp_color_management_surface_v1_set_image_description(
-        cmSurface, desc, WP_COLOR_MANAGER_V1_RENDER_INTENT_PERCEPTUAL);
+        m_cmSurface, desc, WP_COLOR_MANAGER_V1_RENDER_INTENT_PERCEPTUAL);
+    wp_image_description_v1_destroy(desc); // set has copy semantics
+    wl_display_flush(m_display);
+    std::fprintf(stderr, "vantapaper: surface tagged %s\n", label);
+}
 
-    // set_image_description has copy semantics; the description may be destroyed now.
-    wp_image_description_v1_destroy(desc);
+void SurfaceColor::setWindowsScrgb()
+{
+    if (!valid() || !m_supportsScrgb)
+        return;
+    applyDescription(wp_color_manager_v1_create_windows_scrgb(m_manager), "Windows-scRGB (HDR)");
+}
 
-    // Flush the requests; the (double-buffered) image description is applied on
-    // the surface's next wl_surface.commit, which the next rendered frame does.
-    wl_display_flush(display);
-
-    std::fprintf(stderr, "vantapaper: surface tagged Windows-scRGB -> true-black HDR\n");
-
-    // cmSurface, manager and registry are intentionally leaked: they must remain
-    // alive for the surface's (process) lifetime.
-    return true;
+void SurfaceColor::setSrgb()
+{
+    if (!valid())
+        return;
+    wp_image_description_creator_params_v1 *creator =
+        wp_color_manager_v1_create_parametric_creator(m_manager);
+    wp_image_description_creator_params_v1_set_tf_named(
+        creator, WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_SRGB);
+    wp_image_description_creator_params_v1_set_primaries_named(
+        creator, WP_COLOR_MANAGER_V1_PRIMARIES_SRGB);
+    // create() consumes the creator and yields the image description.
+    applyDescription(wp_image_description_creator_params_v1_create(creator), "sRGB (SDR)");
 }
 
 } // namespace cm

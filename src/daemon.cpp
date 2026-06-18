@@ -10,6 +10,8 @@
 #include <QFileInfo>
 #include <QLocalServer>
 #include <QLocalSocket>
+#include <QProcess>
+#include <QHash>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
@@ -181,9 +183,14 @@ void Daemon::start()
         qWarning("vantapaper: no images found in %s", qPrintable(m_dir));
 
     createOutputs();
+    pollHdrStates(); // set each output's initial HDR/SDR mode before first render
     showCurrent();
     for (auto &o : m_outputs)
         o->show();
+
+    // Poll for HDR/SDR toggles (e.g. Super+Ctrl+H) so outputs re-adapt live.
+    connect(&m_hdrPoll, &QTimer::timeout, this, &Daemon::pollHdrStates);
+    m_hdrPoll.start(2000);
 
     startIpc();
     setPaused(m_paused);
@@ -191,6 +198,35 @@ void Daemon::start()
     qInfo("vantapaper: daemon up -- %zu output(s), %d image(s), duration %ds, %s, %d transition(s)",
           m_outputs.size(), m_playlist.size(), m_durationSecs, m_paused ? "paused" : "playing",
           int(m_enabledTransitions.size()));
+}
+
+void Daemon::pollHdrStates()
+{
+    // Hyprland reports each monitor's colour-management preset ("hdr"/"srgb"),
+    // which flips when the user toggles HDR. Cheaper + more reliable than the
+    // wp-color-management surface-feedback dance, and vantapaper is Hyprland-only.
+    QProcess p;
+    p.start(QStringLiteral("hyprctl"), { QStringLiteral("monitors"), QStringLiteral("-j") });
+    if (!p.waitForFinished(500)) {
+        p.kill();
+        return;
+    }
+    const QJsonDocument doc = QJsonDocument::fromJson(p.readAllStandardOutput());
+    if (!doc.isArray())
+        return;
+
+    QHash<QString, bool> hdrByName;
+    for (const QJsonValue &v : doc.array()) {
+        const QJsonObject m = v.toObject();
+        hdrByName.insert(m.value(QStringLiteral("name")).toString(),
+                         m.value(QStringLiteral("colorManagementPreset")).toString()
+                             == QLatin1String("hdr"));
+    }
+    for (auto &o : m_outputs) {
+        const QString name = o->screenName();
+        if (hdrByName.contains(name))
+            o->setHdrMode(hdrByName.value(name));
+    }
 }
 
 void Daemon::createOutputs()
