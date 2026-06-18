@@ -7,6 +7,7 @@
 #include <rhi/qrhi.h>
 
 #include "daemon.h"
+#include "hdr_image.h"
 
 #include <cstdio>
 
@@ -41,10 +42,31 @@ static int runControlClient(int argc, char **argv)
     return 0;
 }
 
+// `vantapaper probe <image>`: decode the file and report whether vantapaper can
+// display it (and how it was interpreted -- see the diagnostics on stderr).
+static int runProbe(int argc, char **argv)
+{
+    QGuiApplication app(argc, argv);
+    if (argc < 3) {
+        std::fprintf(stderr, "usage: vantapaper probe <image>\n");
+        return 2;
+    }
+    const HdrImage h = decodeImage(QString::fromLocal8Bit(argv[2]));
+    if (h.valid()) {
+        std::printf("OK: decoded %dx%d -- vantapaper can display this\n", h.w, h.h);
+        return 0;
+    }
+    std::printf("FAILED: could not decode -- unsupported\n");
+    return 1;
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 2 && QString::fromLocal8Bit(argv[1]) == QLatin1String("ctl"))
         return runControlClient(argc, argv);
+
+    if (argc >= 2 && QString::fromLocal8Bit(argv[1]) == QLatin1String("probe"))
+        return runProbe(argc, argv);
 
     QGuiApplication app(argc, argv);
 

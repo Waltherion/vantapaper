@@ -443,6 +443,49 @@ HdrImage decodeHeic(const QString &path)
 
 // --- General SDR images (PNG/JPEG/WebP/... via Qt's image plugins) ----------
 
+// Read a PNG cICP chunk (the modern HDR PNG tag: primaries + transfer, like AVIF's
+// nclx). QImage ignores cICP, so we parse it ourselves. Returns true and sets
+// tf/bt2020 when the chunk specifies an HDR transfer.
+static bool readPngCicp(const QString &path, Tf &tf, bool &bt2020)
+{
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly))
+        return false;
+    static const unsigned char sig[8] = { 0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n' };
+    const QByteArray head = f.read(8);
+    if (head.size() < 8 || std::memcmp(head.constData(), sig, 8) != 0)
+        return false;
+
+    for (int guard = 0; guard < 64; ++guard) {
+        const QByteArray lenBytes = f.read(4);
+        const QByteArray type = f.read(4);
+        if (lenBytes.size() < 4 || type.size() < 4)
+            break;
+        const quint32 len = (quint8(lenBytes[0]) << 24) | (quint8(lenBytes[1]) << 16)
+                          | (quint8(lenBytes[2]) << 8) | quint8(lenBytes[3]);
+        if (type == "cICP") {
+            const QByteArray data = f.read(len);
+            if (data.size() >= 4) {
+                const int primaries = quint8(data[0]);
+                const int transfer = quint8(data[1]);
+                switch (transfer) {
+                case 16: tf = Tf::PQ; break;
+                case 18: tf = Tf::HLG; break;
+                case 8:  tf = Tf::Linear; break;
+                default: tf = Tf::SRGB; break;
+                }
+                bt2020 = (primaries == 9);
+                return tf != Tf::SRGB;
+            }
+            return false;
+        }
+        if (type == "IDAT" || type == "IEND")
+            break; // cICP, if present, precedes the image data
+        f.seek(f.pos() + len + 4); // skip chunk data + CRC
+    }
+    return false;
+}
+
 HdrImage decodeSdrImage(const QString &path)
 {
     HdrImage result;
@@ -456,13 +499,22 @@ HdrImage decodeSdrImage(const QString &path)
         return result;
     }
 
-    // A 16-bit PNG/TIFF may carry an HDR transfer in its embedded ICC profile
-    // (e.g. "Rec. 2020 PQ"). Detect that and treat it as real HDR.
+    // A 16-bit PNG/TIFF may carry an HDR transfer either in an embedded ICC profile
+    // (e.g. "Rec. 2020 PQ") or in a PNG cICP chunk. Detect either and treat as HDR.
     Tf tf = Tf::SRGB;
     bool bt2020 = false;
     const QByteArray icc = img.colorSpace().isValid() ? img.colorSpace().iccProfile() : QByteArray();
     if (!icc.isEmpty())
         tf = tfFromIcc(icc.constData(), size_t(icc.size()), bt2020);
+    if (tf == Tf::SRGB) {
+        Tf ctf = Tf::SRGB;
+        bool cbt = false;
+        if (readPngCicp(path, ctf, cbt)) {
+            tf = ctf;
+            bt2020 = cbt;
+            std::fprintf(stderr, "vantapaper: PNG cICP HDR transfer=%d bt2020=%d\n", int(tf), int(bt2020));
+        }
+    }
 
     result.w = img.width();
     result.h = img.height();
