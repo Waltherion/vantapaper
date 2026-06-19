@@ -82,3 +82,6 @@ qt6_add_shaders(vantapaper "vantapaper_shaders"
         shaders/fullscreen.vert
         shaders/image.frag
 )
+
+include(GNUInstallDirs)
+install(TARGETS vantapaper RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
