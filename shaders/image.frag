@@ -44,15 +44,14 @@ vec3 srgbEncode(vec3 c)
 
 void main()
 {
-    vec3 a = texture(tex0, v_uv).rgb;
-    vec3 b = texture(tex1, v_uv).rgb;
     bool curIs1 = u.curIndex > 0.5;
-    vec3 incoming = curIs1 ? b : a;
-    vec3 outgoing = curIs1 ? a : b;
-
     float p = clamp(u.progress, 0.0, 1.0);
     int t = int(floor(u.ttype + 0.5));
 
+    // Per-transition: incoming/outgoing sample coords (default in place) and the
+    // incoming coverage weight f (0 = show outgoing, 1 = show incoming).
+    vec2 iuv = v_uv;
+    vec2 ouv = v_uv;
     float f;
     if (u.ttype < 0.0 || p >= 1.0) {
         f = 1.0;
@@ -67,10 +66,20 @@ void main()
         float dist = length(c);
         float r = p * 1.6;
         f = 1.0 - smoothstep(r - 0.05, r + 0.05, dist);
+    } else if (t == 3) {
+        // slide/push: the incoming image shoves the outgoing one off-screen along a
+        // cardinal axis (angle is snapped to a cardinal, so the push stays in range).
+        vec2 dir = vec2(cos(u.angle), sin(u.angle));
+        float s = dot(v_uv - 0.5, dir) + 0.5; // 0..1 along the push axis
+        f = 1.0 - smoothstep(p - 0.003, p + 0.003, s);
+        iuv = v_uv + dir * (1.0 - p); // incoming slides in from the trailing edge
+        ouv = v_uv - dir * p;         // outgoing is pushed toward the leading edge
     } else {
         f = p;
     }
 
+    vec3 incoming = curIs1 ? texture(tex1, iuv).rgb : texture(tex0, iuv).rgb;
+    vec3 outgoing = curIs1 ? texture(tex0, ouv).rgb : texture(tex1, ouv).rgb;
     vec3 color = mix(outgoing, incoming, f);
 
     if (u.sdr > 0.5) {

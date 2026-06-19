@@ -29,12 +29,17 @@ static const char *kDefaultConfig = R"(// vantapaper configuration (JSONC: // an
   "durationSecs": 180,   // seconds between automatic wallpaper changes
   "startPaused": true,   // start with autorotation paused (toggle with the keybind)
 
+  // --- Playback order ---
+  // "ascending" -> alphabetical by filename. "random" -> shuffle-bag: every image
+  // shows once before any repeats, never repeating across a reshuffle.
+  "sort": "ascending",
+
   // --- Transitions ---
   // A random one is chosen from "enabled" on each change.
-  // Available: "fade", "wipe", "grow". Remove any you dislike.
+  // Available: "fade", "wipe", "slide", "grow". Remove any you dislike.
   // Use [] or ["none"] to switch instantly with no animation.
   "transition": {
-    "enabled": ["fade", "wipe", "grow"],
+    "enabled": ["fade", "wipe", "slide", "grow"],
     "durationMs": 600
   }
 }
@@ -162,6 +167,9 @@ void Daemon::loadConfig()
     const QJsonObject o = doc.object();
     m_durationSecs = o.value(QStringLiteral("durationSecs")).toInt(m_durationSecs);
     m_paused = o.value(QStringLiteral("startPaused")).toBool(m_paused);
+    m_sortRandom = o.value(QStringLiteral("sort")).toString(
+                       m_sortRandom ? QStringLiteral("random") : QStringLiteral("ascending"))
+                       .toLower() == QLatin1String("random");
 
     const QJsonObject tr = o.value(QStringLiteral("transition")).toObject();
     m_transitionMs = tr.value(QStringLiteral("durationMs")).toInt(m_transitionMs);
@@ -172,6 +180,7 @@ void Daemon::loadConfig()
             if (name == QLatin1String("fade")) m_enabledTransitions << 0;
             else if (name == QLatin1String("wipe")) m_enabledTransitions << 1;
             else if (name == QLatin1String("grow")) m_enabledTransitions << 2;
+            else if (name == QLatin1String("slide")) m_enabledTransitions << 3;
             else if (name == QLatin1String("none")) m_enabledTransitions << -1;
         }
     }
@@ -203,6 +212,7 @@ void Daemon::start()
         m_paused = false;
 
     m_playlist.load(m_dir);
+    m_playlist.setMode(m_sortRandom ? Playlist::Random : Playlist::Ascending);
     if (m_playlist.isEmpty())
         qWarning("vantapaper: no images found in %s", qPrintable(m_dir));
 
@@ -219,9 +229,9 @@ void Daemon::start()
     startIpc();
     setPaused(m_paused);
 
-    qInfo("vantapaper: daemon up -- %zu output(s), %d image(s), duration %ds, %s, %d transition(s)",
+    qInfo("vantapaper: daemon up -- %zu output(s), %d image(s), duration %ds, %s, %s, %d transition(s)",
           m_outputs.size(), m_playlist.size(), m_durationSecs, m_paused ? "paused" : "playing",
-          int(m_enabledTransitions.size()));
+          m_sortRandom ? "random" : "ascending", int(m_enabledTransitions.size()));
 }
 
 void Daemon::pollHdrStates()
@@ -285,6 +295,9 @@ Transition Daemon::pickTransition() const
         // grow: a random-ish centre, biased away from the very edges.
         t.cx = 0.2f + float(rng->bounded(0.6));
         t.cy = 0.2f + float(rng->bounded(0.6));
+    } else if (t.type == 3) {
+        // slide/push: along one of the four cardinal directions.
+        t.angle = float(rng->bounded(4)) * float(M_PI_2);
     }
     return t;
 }

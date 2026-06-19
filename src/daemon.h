@@ -50,7 +50,8 @@ private:
     // From config (~/.config/vantapaper/config.jsonc), env can override for testing.
     int m_durationSecs = 180;
     bool m_paused = true;
-    QList<int> m_enabledTransitions { 0, 1, 2 }; // fade, wipe, grow
+    bool m_sortRandom = false; // false = ascending, true = shuffle-bag
+    QList<int> m_enabledTransitions { 0, 1, 2, 3 }; // fade, wipe, grow, slide
     int m_transitionMs = 600;
 
     Playlist m_playlist;
