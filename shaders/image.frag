@@ -66,6 +66,13 @@ void main()
         float dist = length(c);
         float r = p * 1.6;
         f = 1.0 - smoothstep(r - 0.05, r + 0.05, dist);
+    } else if (t == 4) {
+        // shrink: the outgoing image collapses into a disk that contracts to the
+        // point (cx,cy), with the incoming image revealed from outside inward.
+        vec2 c = (v_uv - vec2(u.cx, u.cy)) * vec2(u.aspect, 1.0);
+        float dist = length(c);
+        float r = (1.0 - p) * 1.6;
+        f = smoothstep(r - 0.05, r + 0.05, dist);
     } else if (t == 3) {
         // slide/push: the incoming image shoves the outgoing one off-screen along a
         // cardinal axis (angle is snapped to a cardinal, so the push stays in range).

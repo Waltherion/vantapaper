@@ -25,6 +25,10 @@
 
 static const char *kDefaultConfig = R"(// vantapaper configuration (JSONC: // and /* */ comments are allowed)
 {
+  // --- Source ---
+  // Folder to read wallpapers from. "~" and $ENV are expanded.
+  "path": "~/Pictures/wallpapers",
+
   // --- Autorotation ---
   "durationSecs": 180,   // seconds between automatic wallpaper changes
   "startPaused": true,   // start with autorotation paused (toggle with the keybind)
@@ -36,14 +40,36 @@ static const char *kDefaultConfig = R"(// vantapaper configuration (JSONC: // an
 
   // --- Transitions ---
   // A random one is chosen from "enabled" on each change.
-  // Available: "fade", "wipe", "slide", "grow". Remove any you dislike.
+  // Available: "fade", "wipe", "slide", "grow", "shrink". Remove any you dislike.
   // Use [] or ["none"] to switch instantly with no animation.
   "transition": {
-    "enabled": ["fade", "wipe", "slide", "grow"],
+    "enabled": ["fade", "wipe", "slide", "grow", "shrink"],
     "durationMs": 600
   }
 }
 )";
+
+// Expand a leading "~" and $ENV references in a config path.
+static QString expandPath(QString p)
+{
+    if (p == QLatin1String("~"))
+        return QDir::homePath();
+    if (p.startsWith(QLatin1String("~/")))
+        p = QDir::homePath() + p.mid(1);
+    QRegularExpression re(QStringLiteral("\\$(\\w+)|\\$\\{(\\w+)\\}"));
+    QString out;
+    int last = 0;
+    auto it = re.globalMatch(p);
+    while (it.hasNext()) {
+        const QRegularExpressionMatch m = it.next();
+        out += p.mid(last, m.capturedStart() - last);
+        const QString name = m.captured(1).isEmpty() ? m.captured(2) : m.captured(1);
+        out += qEnvironmentVariable(name.toLocal8Bit().constData());
+        last = m.capturedEnd();
+    }
+    out += p.mid(last);
+    return out;
+}
 
 static QString configPath()
 {
@@ -165,6 +191,9 @@ void Daemon::loadConfig()
     }
 
     const QJsonObject o = doc.object();
+    const QString cfgPath = o.value(QStringLiteral("path")).toString();
+    if (!cfgPath.isEmpty())
+        m_dir = expandPath(cfgPath);
     m_durationSecs = o.value(QStringLiteral("durationSecs")).toInt(m_durationSecs);
     m_paused = o.value(QStringLiteral("startPaused")).toBool(m_paused);
     m_sortRandom = o.value(QStringLiteral("sort")).toString(
@@ -181,6 +210,7 @@ void Daemon::loadConfig()
             else if (name == QLatin1String("wipe")) m_enabledTransitions << 1;
             else if (name == QLatin1String("grow")) m_enabledTransitions << 2;
             else if (name == QLatin1String("slide")) m_enabledTransitions << 3;
+            else if (name == QLatin1String("shrink")) m_enabledTransitions << 4;
             else if (name == QLatin1String("none")) m_enabledTransitions << -1;
         }
     }
@@ -291,8 +321,8 @@ Transition Daemon::pickTransition() const
             t.angle = float(rng->bounded(4)) * float(M_PI_2);
         else
             t.angle = float(rng->bounded(2.0 * M_PI));
-    } else if (t.type == 2) {
-        // grow: a random-ish centre, biased away from the very edges.
+    } else if (t.type == 2 || t.type == 4) {
+        // grow / shrink: a random-ish centre, biased away from the very edges.
         t.cx = 0.2f + float(rng->bounded(0.6));
         t.cy = 0.2f + float(rng->bounded(0.6));
     } else if (t.type == 3) {

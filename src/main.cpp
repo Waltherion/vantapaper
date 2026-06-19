@@ -142,9 +142,8 @@ int main(int argc, char **argv)
     if (!inst.create())
         qFatal("vantapaper: failed to create Vulkan instance");
 
-    // Wallpaper source: the active theme's folder (static path; `current` is a
-    // symlink Walther flips per theme). Rotation/transition come from the config.
-    const QString dir = QDir::homePath() + QStringLiteral("/.config/themes/current/wallpapers");
+    // Fallback wallpaper source; the config's "path" overrides it (see Daemon).
+    const QString dir = QDir::homePath() + QStringLiteral("/Pictures/wallpapers");
 
     Daemon daemon(&inst, dir);
     daemon.start();

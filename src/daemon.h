@@ -51,7 +51,7 @@ private:
     int m_durationSecs = 180;
     bool m_paused = true;
     bool m_sortRandom = false; // false = ascending, true = shuffle-bag
-    QList<int> m_enabledTransitions { 0, 1, 2, 3 }; // fade, wipe, grow, slide
+    QList<int> m_enabledTransitions { 0, 1, 2, 3, 4 }; // fade, wipe, grow, slide, shrink
     int m_transitionMs = 600;
 
     Playlist m_playlist;
