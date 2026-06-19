@@ -20,6 +20,9 @@ public:
     QString next();
     QString previous();
 
+    // Jump to a specific file (absolute path). Returns false if it's not in the list.
+    bool setCurrentPath(const QString &path);
+
 private:
     QString m_dir;
     QStringList m_files; // absolute paths

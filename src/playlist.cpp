@@ -64,3 +64,12 @@ QString Playlist::previous()
     m_index = (m_index - 1 + m_files.size()) % m_files.size();
     return current();
 }
+
+bool Playlist::setCurrentPath(const QString &path)
+{
+    const int i = m_files.indexOf(path);
+    if (i < 0)
+        return false;
+    m_index = i;
+    return true;
+}

@@ -376,6 +376,16 @@ void Daemon::setPaused(bool paused)
 
 QString Daemon::handleCommand(const QString &cmd)
 {
+    if (cmd.startsWith(QLatin1String("show "))) {
+        const QString path = cmd.mid(5);
+        if (!m_playlist.setCurrentPath(path)) {
+            m_playlist.reload(); // maybe a newly-added image
+            if (!m_playlist.setCurrentPath(path))
+                return QStringLiteral("not found: ") + path;
+        }
+        showCurrent();
+        return QStringLiteral("ok");
+    }
     if (cmd == QLatin1String("next")) { next(); return QStringLiteral("ok"); }
     if (cmd == QLatin1String("previous") || cmd == QLatin1String("prev")) { previous(); return QStringLiteral("ok"); }
     if (cmd == QLatin1String("reload")) { reload(); return QStringLiteral("ok"); }
