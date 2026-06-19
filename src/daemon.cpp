@@ -56,6 +56,15 @@ static QString stateDir()
     return base + QStringLiteral("/vantapaper/wallpapers");
 }
 
+// File that remembers play/paused across restarts (theme switches restart us).
+static QString playStatePath()
+{
+    QString base = qEnvironmentVariable("XDG_STATE_HOME");
+    if (base.isEmpty())
+        base = QDir::homePath() + QStringLiteral("/.local/state");
+    return base + QStringLiteral("/vantapaper/play-state");
+}
+
 // Strip // and /* */ comments (respecting strings) and trailing commas, so a JSONC
 // file parses with QJsonDocument.
 static QByteArray cleanJsonc(const QByteArray &in)
@@ -172,7 +181,20 @@ void Daemon::start()
 {
     loadConfig();
 
-    // Env overrides for testing.
+    // Restore the last play/paused state (survives restarts + theme switches),
+    // overriding the config default.
+    {
+        QFile f(playStatePath());
+        if (f.open(QIODevice::ReadOnly)) {
+            const QByteArray s = f.readAll().trimmed();
+            if (s == "paused")
+                m_paused = true;
+            else if (s == "playing")
+                m_paused = false;
+        }
+    }
+
+    // Env overrides for testing (highest precedence).
     bool okDur = false;
     const int d = qEnvironmentVariable("VANTAPAPER_DURATION_SECS").toInt(&okDur);
     if (okDur && d > 0)
@@ -344,6 +366,12 @@ void Daemon::setPaused(bool paused)
         m_timer.stop();
     else
         m_timer.start(m_durationSecs * 1000);
+
+    // Persist so the choice survives restarts + theme switches.
+    QDir().mkpath(QFileInfo(playStatePath()).absolutePath());
+    QFile f(playStatePath());
+    if (f.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        f.write(m_paused ? "paused\n" : "playing\n");
 }
 
 QString Daemon::handleCommand(const QString &cmd)
