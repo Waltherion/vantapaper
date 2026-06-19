@@ -58,4 +58,5 @@ private:
     QTimer m_timer;
     QTimer m_hdrPoll;
     QLocalServer *m_server = nullptr;
+    quint64 m_decodeGen = 0; // newest async-decode request; stale results are dropped
 };

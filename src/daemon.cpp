@@ -12,6 +12,8 @@
 #include <QLocalSocket>
 #include <QProcess>
 #include <QHash>
+#include <QtConcurrent>
+#include <QFutureWatcher>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
@@ -271,18 +273,32 @@ void Daemon::showCurrent()
     if (path.isEmpty())
         return;
 
-    HdrImage h = decodeImage(path);
-    if (!h.valid()) {
-        qWarning("vantapaper: failed to decode %s", qPrintable(path));
-        return;
-    }
-    auto img = std::make_shared<const HdrImage>(std::move(h));
-    const Transition t = pickTransition(); // ignored by an output until its first image
-    for (auto &o : m_outputs)
-        o->setImage(img, t);
-
-    updateStateLinks(path);
-    qInfo("vantapaper: showing %s", qPrintable(path));
+    // Decode off the main thread so large images don't freeze the switch. The
+    // current wallpaper stays on screen until the new one is ready; only the
+    // newest request wins (rapid next/prev decodes the final image, drops the rest).
+    const quint64 gen = ++m_decodeGen;
+    auto *watcher = new QFutureWatcher<std::shared_ptr<const HdrImage>>(this);
+    connect(watcher, &QFutureWatcherBase::finished, this, [this, watcher, path, gen]() {
+        const std::shared_ptr<const HdrImage> img = watcher->result();
+        watcher->deleteLater();
+        if (gen != m_decodeGen)
+            return; // superseded by a newer switch
+        if (!img) {
+            qWarning("vantapaper: failed to decode %s", qPrintable(path));
+            return;
+        }
+        const Transition t = pickTransition(); // ignored until an output's first image
+        for (auto &o : m_outputs)
+            o->setImage(img, t);
+        updateStateLinks(path);
+        qInfo("vantapaper: showing %s", qPrintable(path));
+    });
+    watcher->setFuture(QtConcurrent::run([path]() -> std::shared_ptr<const HdrImage> {
+        HdrImage h = decodeImage(path);
+        if (!h.valid())
+            return {};
+        return std::make_shared<const HdrImage>(std::move(h));
+    }));
 }
 
 void Daemon::updateStateLinks(const QString &imagePath)

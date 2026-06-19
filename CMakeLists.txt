@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 
 # QRhi lives in Qt's "rhi" headers, exposed through the GuiPrivate component.
-find_package(Qt6 REQUIRED COMPONENTS Gui GuiPrivate ShaderTools Network)
+find_package(Qt6 REQUIRED COMPONENTS Gui GuiPrivate ShaderTools Network Concurrent)
 find_package(LayerShellQt REQUIRED)
 
 find_package(PkgConfig REQUIRED)
@@ -63,6 +63,7 @@ target_link_libraries(vantapaper PRIVATE
     Qt6::Gui
     Qt6::GuiPrivate
     Qt6::Network
+    Qt6::Concurrent
     LayerShellQt::Interface
     PkgConfig::WaylandClient
     PkgConfig::Avif
