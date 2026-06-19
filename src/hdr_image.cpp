@@ -17,6 +17,40 @@
 #include <cmath>
 #include <cstring>
 #include <cstdio>
+#include <thread>
+#include <vector>
+
+// Run fn(y) for every image row, split across all CPU cores. The per-pixel
+// linearisation is the decode bottleneck on large HDR images; each row writes a
+// distinct output region, so this is race-free.
+template <typename F>
+static void parallelRows(int height, F &&fn)
+{
+    unsigned n = std::thread::hardware_concurrency();
+    if (n == 0)
+        n = 1;
+    if (height < 128 || n <= 1) {
+        for (int y = 0; y < height; ++y)
+            fn(y);
+        return;
+    }
+    n = std::min<unsigned>(n, unsigned(height));
+    const int per = (height + int(n) - 1) / int(n);
+    std::vector<std::thread> threads;
+    threads.reserve(n);
+    for (unsigned t = 0; t < n; ++t) {
+        const int y0 = int(t) * per;
+        const int y1 = std::min(height, y0 + per);
+        if (y0 >= y1)
+            break;
+        threads.emplace_back([&fn, y0, y1]() {
+            for (int y = y0; y < y1; ++y)
+                fn(y);
+        });
+    }
+    for (auto &th : threads)
+        th.join();
+}
 
 HdrImage decodeUltraHdr(const QString &path)
 {
@@ -219,7 +253,7 @@ HdrImage decodeAvif(const QString &path)
     result.rgba16f.resize(size_t(w) * h * 4);
 
     qfloat16 *dst = reinterpret_cast<qfloat16 *>(result.rgba16f.data());
-    for (int y = 0; y < h; ++y) {
+    parallelRows(h, [&](int y) {
         const qfloat16 *src = reinterpret_cast<const qfloat16 *>(rgb.pixels + size_t(y) * rgb.rowBytes);
         for (int x = 0; x < w; ++x) {
             float rr = linChan(float(src[x * 4 + 0]), tf);
@@ -234,7 +268,7 @@ HdrImage decodeAvif(const QString &path)
             dst[o + 2] = qfloat16(std::max(bb, 0.0f));
             dst[o + 3] = qfloat16(aa);
         }
-    }
+    });
 
     result.hdr = (tf != Tf::SRGB);
     std::fprintf(stderr, "vantapaper: decoded AVIF %dx%d depth=%d transfer=%d bt2020=%d\n",
@@ -336,17 +370,19 @@ HdrImage decodeJxl(const QString &path)
     result.h = h;
     result.rgba16f.resize(size_t(w) * h * 4);
     qfloat16 *dst = reinterpret_cast<qfloat16 *>(result.rgba16f.data());
-    for (size_t i = 0; i < size_t(w) * h; ++i) {
-        float rr = linChan(pixels[i * 4 + 0], tf);
-        float gg = linChan(pixels[i * 4 + 1], tf);
-        float bb = linChan(pixels[i * 4 + 2], tf);
-        if (bt2020)
-            bt2020ToBt709(rr, gg, bb);
-        dst[i * 4 + 0] = qfloat16(std::max(rr, 0.0f));
-        dst[i * 4 + 1] = qfloat16(std::max(gg, 0.0f));
-        dst[i * 4 + 2] = qfloat16(std::max(bb, 0.0f));
-        dst[i * 4 + 3] = qfloat16(pixels[i * 4 + 3]);
-    }
+    parallelRows(h, [&](int y) {
+        for (size_t i = size_t(y) * w; i < size_t(y + 1) * w; ++i) {
+            float rr = linChan(pixels[i * 4 + 0], tf);
+            float gg = linChan(pixels[i * 4 + 1], tf);
+            float bb = linChan(pixels[i * 4 + 2], tf);
+            if (bt2020)
+                bt2020ToBt709(rr, gg, bb);
+            dst[i * 4 + 0] = qfloat16(std::max(rr, 0.0f));
+            dst[i * 4 + 1] = qfloat16(std::max(gg, 0.0f));
+            dst[i * 4 + 2] = qfloat16(std::max(bb, 0.0f));
+            dst[i * 4 + 3] = qfloat16(pixels[i * 4 + 3]);
+        }
+    });
     result.hdr = (tf != Tf::SRGB);
     std::fprintf(stderr, "vantapaper: decoded JXL %dx%d transfer=%d bt2020=%d\n", w, h, int(tf), int(bt2020));
     return result;
@@ -418,7 +454,7 @@ HdrImage decodeHeic(const QString &path)
         result.h = h;
         result.rgba16f.resize(size_t(w) * h * 4);
         qfloat16 *dst = reinterpret_cast<qfloat16 *>(result.rgba16f.data());
-        for (int y = 0; y < h; ++y) {
+        parallelRows(h, [&](int y) {
             const uint16_t *row = reinterpret_cast<const uint16_t *>(plane + size_t(y) * stride);
             for (int x = 0; x < w; ++x) {
                 float rr = linChan(row[x * 4 + 0] / maxv, tf);
@@ -433,7 +469,7 @@ HdrImage decodeHeic(const QString &path)
                 dst[o + 2] = qfloat16(std::max(bb, 0.0f));
                 dst[o + 3] = qfloat16(aa);
             }
-        }
+        });
         result.hdr = (tf != Tf::SRGB);
         std::fprintf(stderr, "vantapaper: decoded HEIC %dx%d bpp=%d transfer=%d bt2020=%d\n",
                      w, h, bpp, int(tf), int(bt2020));
@@ -528,38 +564,45 @@ HdrImage decodeSdrImage(const QString &path)
 
     if (tf != Tf::SRGB) {
         // HDR image: keep the full 16-bit precision and linearise via the transfer.
+        // A 16-bit -> linear LUT replaces the per-pixel pow(); rows run in parallel.
         img = img.convertToFormat(QImage::Format_RGBA64);
-        for (int y = 0; y < result.h; ++y) {
+        std::vector<float> lut(65536);
+        for (int i = 0; i < 65536; ++i)
+            lut[i] = linChan(i / 65535.0f, tf);
+        const int w = result.w;
+        parallelRows(result.h, [&, w](int y) {
             const quint16 *line = reinterpret_cast<const quint16 *>(img.constScanLine(y));
-            for (int x = 0; x < result.w; ++x) {
-                float rr = linChan(line[x * 4 + 0] / 65535.0f, tf);
-                float gg = linChan(line[x * 4 + 1] / 65535.0f, tf);
-                float bb = linChan(line[x * 4 + 2] / 65535.0f, tf);
+            for (int x = 0; x < w; ++x) {
+                float rr = lut[line[x * 4 + 0]], gg = lut[line[x * 4 + 1]], bb = lut[line[x * 4 + 2]];
                 const float aa = line[x * 4 + 3] / 65535.0f;
                 if (bt2020)
                     bt2020ToBt709(rr, gg, bb);
-                const size_t o = (size_t(y) * result.w + x) * 4;
+                const size_t o = (size_t(y) * w + x) * 4;
                 dst[o + 0] = qfloat16(std::max(rr, 0.0f));
                 dst[o + 1] = qfloat16(std::max(gg, 0.0f));
                 dst[o + 2] = qfloat16(std::max(bb, 0.0f));
                 dst[o + 3] = qfloat16(aa);
             }
-        }
+        });
         std::fprintf(stderr, "vantapaper: loaded HDR image %dx%d via QImage (transfer=%d bt2020=%d)\n",
                      result.w, result.h, int(tf), int(bt2020));
     } else {
-        // SDR: sRGB -> linear; black (0) stays 0 -> true black on the HDR surface.
+        // SDR: sRGB -> linear (8-bit LUT); black (0) stays 0 -> true black.
         img = img.convertToFormat(QImage::Format_RGBA8888);
-        for (int y = 0; y < result.h; ++y) {
+        float slut[256];
+        for (int i = 0; i < 256; ++i)
+            slut[i] = srgbEotf(i / 255.0f);
+        const int w = result.w;
+        parallelRows(result.h, [&, w](int y) {
             const uchar *line = img.constScanLine(y);
-            for (int x = 0; x < result.w; ++x) {
-                const size_t o = (size_t(y) * result.w + x) * 4;
-                dst[o + 0] = qfloat16(srgbEotf(line[x * 4 + 0] / 255.0f));
-                dst[o + 1] = qfloat16(srgbEotf(line[x * 4 + 1] / 255.0f));
-                dst[o + 2] = qfloat16(srgbEotf(line[x * 4 + 2] / 255.0f));
+            for (int x = 0; x < w; ++x) {
+                const size_t o = (size_t(y) * w + x) * 4;
+                dst[o + 0] = qfloat16(slut[line[x * 4 + 0]]);
+                dst[o + 1] = qfloat16(slut[line[x * 4 + 1]]);
+                dst[o + 2] = qfloat16(slut[line[x * 4 + 2]]);
                 dst[o + 3] = qfloat16(line[x * 4 + 3] / 255.0f);
             }
-        }
+        });
         std::fprintf(stderr, "vantapaper: loaded SDR image %dx%d via QImage\n", result.w, result.h);
     }
     return result;
