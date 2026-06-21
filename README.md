@@ -1,25 +1,28 @@
 # vantapaper
 
-An HDR-correct wallpaper daemon for Hyprland (wlr-layer-shell) that keeps **true
-blacks on OLED** — the one thing every existing Wayland wallpaper tool gets wrong
-in HDR mode.
+A natively HDR wallpaper daemon for Hyprland (wlr-layer-shell). It renders through
+its own color-managed Vulkan swapchain, so HDR stills display as **real HDR** —
+genuine highlights, wide gamut, and correct blacks on OLED — instead of the
+tone-mapped-to-SDR approximation most wallpaper tools fall back to.
 
 It owns its own Vulkan swapchain and tags it through `wp-color-management-v1`, so
-HDR wallpapers display with real highlights *and* genuinely off black pixels on an
-OLED, while SDR monitors (and HDR-off) get correct, untagged sRGB output. It decodes
-real HDR stills — including UltraHDR gain-map JPEGs that mpv-based tools cannot read.
+HDR wallpapers render in linear scRGB with real highlights, while SDR monitors
+(and HDR-off) get correct, untagged sRGB output. It decodes real HDR stills —
+including UltraHDR gain-map JPEGs that mpv-based tools cannot read.
 
 ## Why
 
-In Hyprland's HDR mode the compositor maps SDR content up and lifts the black floor
-(see [hyprwm/Hyprland#9716](https://github.com/hyprwm/Hyprland/issues/9716)), so OLED
-blacks look grey. Color-managed clients that tag their own surface keep true black.
-vantapaper is built around exactly that: own the swapchain, tag it correctly per
-output, and render in linear scRGB.
+Almost every Wayland wallpaper tool is SDR-only, or leans on mpv and can only fake
+HDR by tone-mapping it down to SDR. Showing an HDR still as actual HDR needs a client
+that owns its swapchain, tags it through `wp-color-management-v1`, and renders in
+linear scRGB per output — keeping real highlights and genuine black on OLED.
+vantapaper is built around exactly that.
 
 ## Features
 
-- **True black on OLED** in HDR mode via `wp-color-management-v1` (windows-scRGB).
+- **Real HDR rendering.** HDR stills display as HDR — linear scRGB tagged via
+  `wp-color-management-v1` (windows-scRGB) — with genuine highlights and correct
+  black on OLED, not a tone-mapped-to-SDR approximation.
 - **Per-output, live HDR/SDR.** Each monitor renders in its current mode; toggling a
   monitor's HDR on/off is picked up live (polls Hyprland) and the surface re-tags
   without a restart. HDR images on an SDR monitor are tone-mapped, not blown out.
