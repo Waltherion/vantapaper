@@ -130,7 +130,7 @@ is polled so HDR↔SDR toggles re-negotiate the swapchain live.
 ## Roadmap
 
 - Video wallpapers (libmpv underlay)
-- Interactive overlays — a real terminal mapped onto a "screen" inside the image
+- Interactive overlays
 - Wallpaper Engine scene/web compatibility (maybe)
 
 ## License
