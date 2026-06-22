@@ -1,7 +1,5 @@
 # vantapaper
 
-<img width="512" height="512" alt="VantaViewer-512x512" src="https://github.com/user-attachments/assets/fd8ab9b6-11e8-4963-abe6-68e1278ed4d6" />
-
 A natively HDR wallpaper daemon for Hyprland (wlr-layer-shell). It renders through
 its own color-managed Vulkan swapchain, so HDR stills display as **real HDR** —
 genuine highlights, wide gamut, and correct blacks on OLED — instead of the
