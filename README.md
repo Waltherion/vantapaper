@@ -1,5 +1,7 @@
 # vantapaper
 
+<img width="512" height="512" alt="VantaViewer-512x512" src="https://github.com/user-attachments/assets/fd8ab9b6-11e8-4963-abe6-68e1278ed4d6" />
+
 A natively HDR wallpaper daemon for Hyprland (wlr-layer-shell). It renders through
 its own color-managed Vulkan swapchain, so HDR stills display as **real HDR** —
 genuine highlights, wide gamut, and correct blacks on OLED — instead of the
@@ -9,8 +11,6 @@ It owns its own Vulkan swapchain and tags it through `wp-color-management-v1`, s
 HDR wallpapers render in linear scRGB with real highlights, while SDR monitors
 (and HDR-off) get correct, untagged sRGB output. It decodes real HDR stills —
 including UltraHDR gain-map JPEGs that mpv-based tools cannot read.
-
-<img width="512" height="512" alt="VantaViewer-512x512" src="https://github.com/user-attachments/assets/fd8ab9b6-11e8-4963-abe6-68e1278ed4d6" />
 
 ## Why
 
