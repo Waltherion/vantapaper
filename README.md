@@ -31,8 +31,9 @@ vantapaper is built around exactly that.
   profiles are read via lcms2.
 - **Autorotation** with pause/play/next/previous, ascending **or** shuffle-bag
   random order (every image once before any repeat).
-- **Transitions:** fade, wipe, slide (push), grow, shrink — random mix per change,
-  or none.
+- **Transitions:** fade, wipe, slide (push), grow, shrink. Random mix per change, or
+  none. Slide can be directional, and a `series` mode ties next/previous to a slide so
+  a run of images reads like a filmstrip (next from the right, previous from the left).
 - **Async decode** (background thread, parallel rows + transfer LUTs) so switches
   never stutter; idle cost is near-zero (renders once, only animates a transition).
 - **IPC** control via a small `vantapaper ctl` client.
@@ -109,9 +110,17 @@ vantapaper thumbnail <in> <out> [px]  # HDR-aware tone-mapped sRGB thumbnail (fo
   "sort": "ascending",
 
   "transition": {
-    // any of: "fade", "wipe", "slide", "grow", "shrink"  (one picked at random per change)
-    // use [] or ["none"] for instant switches
+    // Random pool. "slide" = random side; directional variants name the side the new
+    // image enters from: "slide-left" / "slide-right" / "slide-up" / "slide-down".
+    // Use [] or ["none"] for instant switches.
     "enabled": ["fade", "wipe", "slide", "grow", "shrink"],
+
+    // Filmstrip: tie next/previous (and autorotation) to a directional slide.
+    //   "none" = use the pool above
+    //   "horizontal" = next from the right, previous from the left
+    //   "vertical"   = next from the bottom, previous from the top
+    "series": "none",
+
     "durationMs": 600
   }
 }

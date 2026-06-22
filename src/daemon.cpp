@@ -39,11 +39,19 @@ static const char *kDefaultConfig = R"(// vantapaper configuration (JSONC: // an
   "sort": "ascending",
 
   // --- Transitions ---
-  // A random one is chosen from "enabled" on each change.
-  // Available: "fade", "wipe", "slide", "grow", "shrink". Remove any you dislike.
-  // Use [] or ["none"] to switch instantly with no animation.
+  // A random one is chosen from "enabled" on each change. Available: "fade", "wipe",
+  // "grow", "shrink", and "slide". Slide may be plain ("slide" = random side) or
+  // directional: "slide-left"/"slide-right"/"slide-up"/"slide-down" name the side the
+  // new image enters from. Use [] or ["none"] to switch instantly with no animation.
+  //
+  // "series" ties next/previous (and autorotation) to a directional slide, so a run of
+  // images reads like a filmstrip:
+  //   "none"        -> next/previous use the random pool above
+  //   "horizontal"  -> next enters from the right, previous from the left
+  //   "vertical"    -> next enters from the bottom, previous from the top
   "transition": {
     "enabled": ["fade", "wipe", "slide", "grow", "shrink"],
+    "series": "none",
     "durationMs": 600
   }
 }
@@ -131,6 +139,36 @@ static QByteArray cleanJsonc(const QByteArray &in)
     return str.toUtf8();
 }
 
+// Side the new image enters from -> slide direction angle (radians).
+// 0 left, 1 right, 2 top, 3 bottom. (Verified against shaders/image.frag's slide branch.)
+static float angleForSide(int side)
+{
+    switch (side) {
+    case 1:  return float(M_PI);         // enters from the right
+    case 2:  return float(M_PI_2);       // enters from the top
+    case 3:  return float(3.0 * M_PI_2); // enters from the bottom
+    case 0:
+    default: return 0.0f;                // enters from the left
+    }
+}
+
+// Map a config transition name to a spec. type == -2 -> unrecognised (caller skips it).
+static TransitionSpec parseTransitionName(const QString &raw)
+{
+    const QString n = raw.trimmed().toLower();
+    if (n == QLatin1String("fade"))        return { 0, -1 };
+    if (n == QLatin1String("wipe"))        return { 1, -1 };
+    if (n == QLatin1String("grow"))        return { 2, -1 };
+    if (n == QLatin1String("shrink"))      return { 4, -1 };
+    if (n == QLatin1String("none"))        return { -1, -1 };
+    if (n == QLatin1String("slide"))       return { 3, -1 };
+    if (n == QLatin1String("slide-left"))  return { 3, 0 };
+    if (n == QLatin1String("slide-right")) return { 3, 1 };
+    if (n == QLatin1String("slide-up"))    return { 3, 2 };
+    if (n == QLatin1String("slide-down"))  return { 3, 3 };
+    return { -2, -1 };
+}
+
 static void setupLayerShell(QWindow *w, QScreen *screen)
 {
     if (LayerShellQt::Window *ls = LayerShellQt::Window::get(w)) {
@@ -205,15 +243,17 @@ void Daemon::loadConfig()
     if (tr.value(QStringLiteral("enabled")).isArray()) {
         m_enabledTransitions.clear();
         for (const QJsonValue &v : tr.value(QStringLiteral("enabled")).toArray()) {
-            const QString name = v.toString().toLower();
-            if (name == QLatin1String("fade")) m_enabledTransitions << 0;
-            else if (name == QLatin1String("wipe")) m_enabledTransitions << 1;
-            else if (name == QLatin1String("grow")) m_enabledTransitions << 2;
-            else if (name == QLatin1String("slide")) m_enabledTransitions << 3;
-            else if (name == QLatin1String("shrink")) m_enabledTransitions << 4;
-            else if (name == QLatin1String("none")) m_enabledTransitions << -1;
+            const TransitionSpec s = parseTransitionName(v.toString());
+            if (s.type != -2)
+                m_enabledTransitions << s;
         }
     }
+
+    // Filmstrip mode: tie next/previous (and autorotation) to a directional slide.
+    const QString series = tr.value(QStringLiteral("series")).toString().toLower();
+    if (series == QLatin1String("horizontal"))    m_series = Series::Horizontal;
+    else if (series == QLatin1String("vertical")) m_series = Series::Vertical;
+    else                                          m_series = Series::None;
 }
 
 void Daemon::start()
@@ -305,16 +345,12 @@ void Daemon::createOutputs()
     }
 }
 
-Transition Daemon::pickTransition() const
+Transition Daemon::resolveSpec(const TransitionSpec &s) const
 {
     Transition t;
+    t.type = s.type;
     t.durationMs = m_transitionMs;
-    if (m_enabledTransitions.isEmpty()) {
-        t.type = -1;
-        return t;
-    }
     auto *rng = QRandomGenerator::global();
-    t.type = m_enabledTransitions.at(rng->bounded(m_enabledTransitions.size()));
     if (t.type == 1) {
         // wipe: usually a clean cardinal edge, sometimes an angled one.
         if (rng->bounded(10) < 7)
@@ -326,13 +362,31 @@ Transition Daemon::pickTransition() const
         t.cx = 0.2f + float(rng->bounded(0.6));
         t.cy = 0.2f + float(rng->bounded(0.6));
     } else if (t.type == 3) {
-        // slide/push: along one of the four cardinal directions.
-        t.angle = float(rng->bounded(4)) * float(M_PI_2);
+        // slide/push: a fixed side, or a random cardinal when slideSide < 0.
+        const int side = (s.slideSide >= 0) ? s.slideSide : rng->bounded(4);
+        t.angle = angleForSide(side);
     }
     return t;
 }
 
+Transition Daemon::pickTransition() const
+{
+    if (m_enabledTransitions.isEmpty()) {
+        Transition t;
+        t.type = -1;
+        t.durationMs = m_transitionMs;
+        return t;
+    }
+    auto *rng = QRandomGenerator::global();
+    return resolveSpec(m_enabledTransitions.at(rng->bounded(m_enabledTransitions.size())));
+}
+
 void Daemon::showCurrent()
+{
+    showCurrent(pickTransition());
+}
+
+void Daemon::showCurrent(Transition t)
 {
     const QString path = m_playlist.current();
     if (path.isEmpty())
@@ -343,7 +397,7 @@ void Daemon::showCurrent()
     // newest request wins (rapid next/prev decodes the final image, drops the rest).
     const quint64 gen = ++m_decodeGen;
     auto *watcher = new QFutureWatcher<std::shared_ptr<const HdrImage>>(this);
-    connect(watcher, &QFutureWatcherBase::finished, this, [this, watcher, path, gen]() {
+    connect(watcher, &QFutureWatcherBase::finished, this, [this, watcher, path, gen, t]() {
         const std::shared_ptr<const HdrImage> img = watcher->result();
         watcher->deleteLater();
         if (gen != m_decodeGen)
@@ -352,9 +406,8 @@ void Daemon::showCurrent()
             qWarning("vantapaper: failed to decode %s", qPrintable(path));
             return;
         }
-        const Transition t = pickTransition(); // ignored until an output's first image
         for (auto &o : m_outputs)
-            o->setImage(img, t);
+            o->setImage(img, t); // t ignored until an output's first image
         updateStateLinks(path);
         qInfo("vantapaper: showing %s", qPrintable(path));
     });
@@ -383,7 +436,10 @@ void Daemon::updateStateLinks(const QString &imagePath)
 void Daemon::next()
 {
     m_playlist.next();
-    showCurrent();
+    // Filmstrip: advance enters from the right (horizontal) / bottom (vertical).
+    if (m_series == Series::Horizontal)    showCurrent(resolveSpec({ 3, 1 }));
+    else if (m_series == Series::Vertical) showCurrent(resolveSpec({ 3, 3 }));
+    else                                   showCurrent();
     if (!m_paused)
         m_timer.start(m_durationSecs * 1000);
 }
@@ -391,7 +447,10 @@ void Daemon::next()
 void Daemon::previous()
 {
     m_playlist.previous();
-    showCurrent();
+    // Filmstrip: go back enters from the left (horizontal) / top (vertical).
+    if (m_series == Series::Horizontal)    showCurrent(resolveSpec({ 3, 0 }));
+    else if (m_series == Series::Vertical) showCurrent(resolveSpec({ 3, 2 }));
+    else                                   showCurrent();
     if (!m_paused)
         m_timer.start(m_durationSecs * 1000);
 }
