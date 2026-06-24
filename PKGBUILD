@@ -9,6 +9,7 @@ url="https://github.com/Waltherion/vantapaper"
 license=('GPL-3.0-or-later')
 depends=(
   'qt6-base'
+  'qt6-wayland'
   'layer-shell-qt'
   'libavif'
   'libjxl'
