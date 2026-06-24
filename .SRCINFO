@@ -1,6 +1,6 @@
 pkgbase = vantapaper-git
 	pkgdesc = HDR-correct Hyprland wallpaper daemon with true blacks on OLED
-	pkgver = r0.0
+	pkgver = r28.21f947c
 	pkgrel = 1
 	url = https://github.com/Waltherion/vantapaper
 	arch = x86_64
@@ -10,6 +10,7 @@ pkgbase = vantapaper-git
 	makedepends = ninja
 	makedepends = qt6-shadertools
 	makedepends = wayland-protocols
+	makedepends = vulkan-headers
 	makedepends = pkgconf
 	depends = qt6-base
 	depends = qt6-wayland

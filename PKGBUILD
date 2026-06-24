@@ -1,7 +1,7 @@
 # Maintainer: Walther <martinwalther.1989@gmail.com>
 _pkgname=vantapaper
 pkgname=vantapaper-git
-pkgver=r0.0
+pkgver=r28.21f947c
 pkgrel=1
 pkgdesc="HDR-correct Hyprland wallpaper daemon with true blacks on OLED"
 arch=('x86_64')
@@ -25,6 +25,7 @@ makedepends=(
   'ninja'
   'qt6-shadertools'
   'wayland-protocols'
+  'vulkan-headers'
   'pkgconf'
 )
 provides=('vantapaper')
