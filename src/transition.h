@@ -1,7 +1,8 @@
 #pragma once
 
 // A transition to play when switching wallpapers.
-// type: <0 instant (no animation), 0 fade, 1 wipe, 2 grow, 3 slide/push, 4 shrink.
+// type: <0 instant (no animation), 0 fade, 1 wipe, 2 grow, 3 slide/push, 4 shrink,
+//       5 wave, 6 pixelate, 7 blinds, 8 radial.
 struct Transition {
     int type = 0;
     int durationMs = 600;

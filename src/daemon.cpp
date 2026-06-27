@@ -40,9 +40,10 @@ static const char *kDefaultConfig = R"(// vantapaper configuration (JSONC: // an
 
   // --- Transitions ---
   // A random one is chosen from "enabled" on each change. Available: "fade", "wipe",
-  // "grow", "shrink", and "slide". Slide may be plain ("slide" = random side) or
-  // directional: "slide-left"/"slide-right"/"slide-up"/"slide-down" name the side the
-  // new image enters from. Use [] or ["none"] to switch instantly with no animation.
+  // "grow", "shrink", "slide", "wave", "pixelate", "blinds", and "radial" (alias
+  // "clock"). Slide may be plain ("slide" = random side) or directional:
+  // "slide-left"/"slide-right"/"slide-up"/"slide-down" name the side the new image
+  // enters from. Use [] or ["none"] to switch instantly with no animation.
   //
   // "series" ties next/previous (and autorotation) to a directional slide, so a run of
   // images reads like a filmstrip:
@@ -50,7 +51,7 @@ static const char *kDefaultConfig = R"(// vantapaper configuration (JSONC: // an
   //   "horizontal"  -> next enters from the right, previous from the left
   //   "vertical"    -> next enters from the bottom, previous from the top
   "transition": {
-    "enabled": ["fade", "wipe", "slide", "grow", "shrink"],
+    "enabled": ["fade", "wipe", "slide", "grow", "shrink", "wave", "pixelate", "blinds", "radial"],
     "series": "none",
     "durationMs": 600
   }
@@ -166,6 +167,11 @@ static TransitionSpec parseTransitionName(const QString &raw)
     if (n == QLatin1String("slide-right")) return { 3, 1 };
     if (n == QLatin1String("slide-up"))    return { 3, 2 };
     if (n == QLatin1String("slide-down"))  return { 3, 3 };
+    if (n == QLatin1String("wave"))        return { 5, -1 };
+    if (n == QLatin1String("pixelate"))    return { 6, -1 };
+    if (n == QLatin1String("blinds"))      return { 7, -1 };
+    if (n == QLatin1String("radial"))      return { 8, -1 };
+    if (n == QLatin1String("clock"))       return { 8, -1 }; // alias for radial
     return { -2, -1 };
 }
 
@@ -351,16 +357,19 @@ Transition Daemon::resolveSpec(const TransitionSpec &s) const
     t.type = s.type;
     t.durationMs = m_transitionMs;
     auto *rng = QRandomGenerator::global();
-    if (t.type == 1) {
-        // wipe: usually a clean cardinal edge, sometimes an angled one.
+    if (t.type == 1 || t.type == 5) {
+        // wipe / wave: usually a clean cardinal edge, sometimes an angled one.
         if (rng->bounded(10) < 7)
             t.angle = float(rng->bounded(4)) * float(M_PI_2);
         else
             t.angle = float(rng->bounded(2.0 * M_PI));
-    } else if (t.type == 2 || t.type == 4) {
-        // grow / shrink: a random-ish centre, biased away from the very edges.
+    } else if (t.type == 2 || t.type == 4 || t.type == 8) {
+        // grow / shrink / radial: a random-ish centre, biased away from the very edges.
         t.cx = 0.2f + float(rng->bounded(0.6));
         t.cy = 0.2f + float(rng->bounded(0.6));
+    } else if (t.type == 7) {
+        // blinds: horizontal or vertical slats.
+        t.angle = (rng->bounded(2) == 0) ? 0.0f : float(M_PI_2);
     } else if (t.type == 3) {
         // slide/push: a fixed side, or a random cardinal when slideSide < 0.
         const int side = (s.slideSide >= 0) ? s.slideSide : rng->bounded(4);

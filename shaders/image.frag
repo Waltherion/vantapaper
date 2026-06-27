@@ -14,7 +14,7 @@ layout(location = 0) out vec4 fragColor;
 layout(std140, binding = 0) uniform U {
     float scale;
     float progress;  // 0..1
-    float ttype;     // 0 fade, 1 wipe, 2 grow, <0 instant
+    float ttype;     // 0 fade,1 wipe,2 grow,3 slide,4 shrink,5 wave,6 pixelate,7 blinds,8 radial,<0 instant
     float curIndex;  // 0 or 1: which sampler holds the incoming image
     float cx;        // grow centre x (0..1)
     float cy;        // grow centre y (0..1)
@@ -81,6 +81,35 @@ void main()
         f = 1.0 - smoothstep(p - 0.003, p + 0.003, s);
         iuv = v_uv + dir * (1.0 - p); // incoming slides in from the trailing edge
         ouv = v_uv - dir * p;         // outgoing is pushed toward the leading edge
+    } else if (t == 5) {
+        // wave: a wipe whose advancing edge is rippled by a sine along the perpendicular.
+        vec2 dir = vec2(cos(u.angle), sin(u.angle));
+        vec2 perp = vec2(-dir.y, dir.x);
+        vec2 c = (v_uv - 0.5) * vec2(u.aspect, 1.0);
+        float d = dot(c, dir) * 0.5 + 0.5;
+        float w = dot(c, perp);
+        float front = p * 1.4 - 0.2;
+        f = 1.0 - smoothstep(front - 0.05, front + 0.05, d + 0.05 * sin(w * 38.0));
+    } else if (t == 6) {
+        // pixelate: a crossfade through a coarse mosaic (blocks are finest at the ends,
+        // coarsest mid-transition). Both images sample the same quantised cell centre.
+        float blocks = mix(2000.0, 26.0, sin(p * 3.14159265));
+        vec2 cell = vec2(blocks, max(1.0, blocks / u.aspect));
+        iuv = (floor(v_uv * cell) + 0.5) / cell;
+        ouv = iuv;
+        f = p;
+    } else if (t == 7) {
+        // blinds: parallel slats (cardinal angle) that all fill with the incoming together.
+        vec2 dir = vec2(cos(u.angle), sin(u.angle));
+        float d = dot(v_uv - 0.5, dir) + 0.5;
+        const float N = 9.0;
+        float local = fract(d * N);
+        f = 1.0 - smoothstep(p - 0.04, p + 0.04, local);
+    } else if (t == 8) {
+        // radial: a clock-style angular sweep around (cx,cy).
+        vec2 c = (v_uv - vec2(u.cx, u.cy)) * vec2(u.aspect, 1.0);
+        float a = (atan(c.y, c.x) + 3.14159265) / (2.0 * 3.14159265);
+        f = 1.0 - smoothstep(p - 0.02, p + 0.02, a);
     } else {
         f = p;
     }
