@@ -29,6 +29,16 @@ static const char *kDefaultConfig = R"(// vantapaper configuration (JSONC: // an
   // Folder to read wallpapers from. "~" and $ENV are expanded.
   "path": "~/Pictures/wallpapers",
 
+  // --- Per-output wallpapers (optional) ---
+  // Give specific monitors their own source folder; any monitor not listed falls back to "path"
+  // above. Keys are Hyprland connector names (see `hyprctl monitors`). Each output rotates its own
+  // playlist, so monitors show different wallpapers. With "sort":"random" even outputs that share a
+  // folder draw independently (variety across screens).
+  // "outputs": {
+  //   "DP-1": { "path": "~/Pictures/wallpapers-hdr" },
+  //   "DP-3": { "path": "~/Pictures/wallpapers-sdr" }
+  // },
+
   // --- Autorotation ---
   "durationSecs": 180,   // seconds between automatic wallpaper changes
   "startPaused": true,   // start with autorotation paused (toggle with the keybind)
@@ -238,6 +248,15 @@ void Daemon::loadConfig()
     const QString cfgPath = o.value(QStringLiteral("path")).toString();
     if (!cfgPath.isEmpty())
         m_dir = expandPath(cfgPath);
+
+    // Per-output source-folder overrides: { "DP-1": { "path": "..." }, ... }
+    m_outputDirs.clear();
+    const QJsonObject outs = o.value(QStringLiteral("outputs")).toObject();
+    for (auto it = outs.begin(); it != outs.end(); ++it) {
+        const QString p = it.value().toObject().value(QStringLiteral("path")).toString();
+        if (!p.isEmpty())
+            m_outputDirs.insert(it.key(), expandPath(p));
+    }
     m_durationSecs = o.value(QStringLiteral("durationSecs")).toInt(m_durationSecs);
     m_paused = o.value(QStringLiteral("startPaused")).toBool(m_paused);
     m_sortRandom = o.value(QStringLiteral("sort")).toString(
@@ -287,16 +306,11 @@ void Daemon::start()
     if (qEnvironmentVariable("VANTAPAPER_START_PLAYING") == QLatin1String("1"))
         m_paused = false;
 
-    m_playlist.load(m_dir);
-    m_playlist.setMode(m_sortRandom ? Playlist::Random : Playlist::Ascending);
-    if (m_playlist.isEmpty())
-        qWarning("vantapaper: no images found in %s", qPrintable(m_dir));
-
-    createOutputs();
+    createOutputs(); // each output loads its own playlist (per-output dir, shared sort mode)
     pollHdrStates(); // set each output's initial HDR/SDR mode before first render
-    showCurrent();
-    for (auto &o : m_outputs)
-        o->show();
+    showAll();
+    for (auto &os : m_outputs)
+        os.win->show();
 
     // Poll for HDR/SDR toggles (e.g. Super+Ctrl+H) so outputs re-adapt live.
     connect(&m_hdrPoll, &QTimer::timeout, this, &Daemon::pollHdrStates);
@@ -305,8 +319,8 @@ void Daemon::start()
     startIpc();
     setPaused(m_paused);
 
-    qInfo("vantapaper: daemon up -- %zu output(s), %d image(s), duration %ds, %s, %s, %d transition(s)",
-          m_outputs.size(), m_playlist.size(), m_durationSecs, m_paused ? "paused" : "playing",
+    qInfo("vantapaper: daemon up -- %zu output(s), duration %ds, %s, %s, %d transition(s)",
+          m_outputs.size(), m_durationSecs, m_paused ? "paused" : "playing",
           m_sortRandom ? "random" : "ascending", int(m_enabledTransitions.size()));
 }
 
@@ -332,22 +346,30 @@ void Daemon::pollHdrStates()
                          m.value(QStringLiteral("colorManagementPreset")).toString()
                              == QLatin1String("hdr"));
     }
-    for (auto &o : m_outputs) {
-        const QString name = o->screenName();
+    for (auto &os : m_outputs) {
+        const QString name = os.win->screenName();
         if (hdrByName.contains(name))
-            o->setHdrMode(hdrByName.value(name));
+            os.win->setHdrMode(hdrByName.value(name));
     }
 }
 
 void Daemon::createOutputs()
 {
+    const Playlist::Mode mode = m_sortRandom ? Playlist::Random : Playlist::Ascending;
     for (QScreen *screen : QGuiApplication::screens()) {
-        auto w = std::make_unique<WallpaperOutput>(m_inst, screen);
-        setupLayerShell(w.get(), screen);
-        w->resize(screen->size());
-        qInfo("vantapaper: output on %s (%dx%d)", qPrintable(screen->name()),
-              screen->size().width(), screen->size().height());
-        m_outputs.push_back(std::move(w));
+        OutputState os;
+        os.win = std::make_unique<WallpaperOutput>(m_inst, screen);
+        setupLayerShell(os.win.get(), screen);
+        os.win->resize(screen->size());
+        const QString name = screen->name();
+        const QString dir = m_outputDirs.value(name, m_dir); // per-output override, else global
+        os.playlist.load(dir);
+        os.playlist.setMode(mode);
+        if (os.playlist.isEmpty())
+            qWarning("vantapaper: no images found in %s (output %s)", qPrintable(dir), qPrintable(name));
+        qInfo("vantapaper: output on %s (%dx%d) <- %s", qPrintable(name),
+              screen->size().width(), screen->size().height(), qPrintable(dir));
+        m_outputs.push_back(std::move(os));
     }
 }
 
@@ -390,23 +412,31 @@ Transition Daemon::pickTransition() const
     return resolveSpec(m_enabledTransitions.at(rng->bounded(m_enabledTransitions.size())));
 }
 
-void Daemon::showCurrent()
+void Daemon::showAll()
 {
-    showCurrent(pickTransition());
+    showAll(pickTransition());
 }
 
-void Daemon::showCurrent(Transition t)
+void Daemon::showAll(Transition t)
 {
-    const QString path = m_playlist.current();
-    if (path.isEmpty())
-        return;
-
-    // Decode off the main thread so large images don't freeze the switch. The
-    // current wallpaper stays on screen until the new one is ready; only the
-    // newest request wins (rapid next/prev decodes the final image, drops the rest).
+    // One generation per change covers every output; a newer change supersedes all
+    // in-flight decodes. One transition is shared so the monitors switch in step.
     const quint64 gen = ++m_decodeGen;
+    for (auto &os : m_outputs) {
+        const QString path = os.playlist.current();
+        if (!path.isEmpty())
+            showOne(os.win.get(), path, t, gen);
+    }
+}
+
+void Daemon::showOne(WallpaperOutput *win, const QString &path, Transition t, quint64 gen)
+{
+    // Decode off the main thread so large images don't freeze the switch. The current
+    // wallpaper stays on screen until the new one is ready; stale decodes (an older gen)
+    // are dropped. The output lives for the daemon's lifetime, so `win` stays valid.
+    const QString name = win->screenName();
     auto *watcher = new QFutureWatcher<std::shared_ptr<const HdrImage>>(this);
-    connect(watcher, &QFutureWatcherBase::finished, this, [this, watcher, path, gen, t]() {
+    connect(watcher, &QFutureWatcherBase::finished, this, [this, watcher, win, name, path, gen, t]() {
         const std::shared_ptr<const HdrImage> img = watcher->result();
         watcher->deleteLater();
         if (gen != m_decodeGen)
@@ -415,10 +445,9 @@ void Daemon::showCurrent(Transition t)
             qWarning("vantapaper: failed to decode %s", qPrintable(path));
             return;
         }
-        for (auto &o : m_outputs)
-            o->setImage(img, t); // t ignored until an output's first image
-        updateStateLinks(path);
-        qInfo("vantapaper: showing %s", qPrintable(path));
+        win->setImage(img, t); // t ignored until an output's first image
+        updateStateLink(name, path);
+        qInfo("vantapaper: %s <- %s", qPrintable(name), qPrintable(path));
     });
     watcher->setFuture(QtConcurrent::run([path]() -> std::shared_ptr<const HdrImage> {
         HdrImage h = decodeImage(path);
@@ -428,46 +457,43 @@ void Daemon::showCurrent(Transition t)
     }));
 }
 
-void Daemon::updateStateLinks(const QString &imagePath)
+void Daemon::updateStateLink(const QString &name, const QString &imagePath)
 {
+    if (name.isEmpty())
+        return;
     const QString dir = stateDir();
     QDir().mkpath(dir);
-    for (auto &o : m_outputs) {
-        const QString name = o->screenName();
-        if (name.isEmpty())
-            continue;
-        const QString link = dir + QLatin1Char('/') + name;
-        QFile::remove(link);
-        QFile::link(imagePath, link);
-    }
+    const QString link = dir + QLatin1Char('/') + name;
+    QFile::remove(link);
+    QFile::link(imagePath, link);
 }
 
 void Daemon::next()
 {
-    m_playlist.next();
+    for (auto &os : m_outputs) os.playlist.next();
     // Filmstrip: advance enters from the right (horizontal) / bottom (vertical).
-    if (m_series == Series::Horizontal)    showCurrent(resolveSpec({ 3, 1 }));
-    else if (m_series == Series::Vertical) showCurrent(resolveSpec({ 3, 3 }));
-    else                                   showCurrent();
+    if (m_series == Series::Horizontal)    showAll(resolveSpec({ 3, 1 }));
+    else if (m_series == Series::Vertical) showAll(resolveSpec({ 3, 3 }));
+    else                                   showAll();
     if (!m_paused)
         m_timer.start(m_durationSecs * 1000);
 }
 
 void Daemon::previous()
 {
-    m_playlist.previous();
+    for (auto &os : m_outputs) os.playlist.previous();
     // Filmstrip: go back enters from the left (horizontal) / top (vertical).
-    if (m_series == Series::Horizontal)    showCurrent(resolveSpec({ 3, 0 }));
-    else if (m_series == Series::Vertical) showCurrent(resolveSpec({ 3, 2 }));
-    else                                   showCurrent();
+    if (m_series == Series::Horizontal)    showAll(resolveSpec({ 3, 0 }));
+    else if (m_series == Series::Vertical) showAll(resolveSpec({ 3, 2 }));
+    else                                   showAll();
     if (!m_paused)
         m_timer.start(m_durationSecs * 1000);
 }
 
 void Daemon::reload()
 {
-    m_playlist.reload();
-    showCurrent();
+    for (auto &os : m_outputs) os.playlist.reload();
+    showAll();
 }
 
 void Daemon::setPaused(bool paused)
@@ -489,12 +515,15 @@ QString Daemon::handleCommand(const QString &cmd)
 {
     if (cmd.startsWith(QLatin1String("show "))) {
         const QString path = cmd.mid(5);
-        if (!m_playlist.setCurrentPath(path)) {
-            m_playlist.reload(); // maybe a newly-added image
-            if (!m_playlist.setCurrentPath(path))
-                return QStringLiteral("not found: ") + path;
+        bool any = false;
+        for (auto &os : m_outputs) {
+            if (os.playlist.setCurrentPath(path)) { any = true; continue; }
+            os.playlist.reload(); // maybe a newly-added image
+            if (os.playlist.setCurrentPath(path)) any = true;
         }
-        showCurrent();
+        if (!any)
+            return QStringLiteral("not found: ") + path;
+        showAll();
         return QStringLiteral("ok");
     }
     if (cmd == QLatin1String("next")) { next(); return QStringLiteral("ok"); }

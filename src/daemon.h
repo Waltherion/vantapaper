@@ -4,6 +4,7 @@
 #include <QString>
 #include <QTimer>
 #include <QList>
+#include <QHash>
 
 #include <memory>
 #include <vector>
@@ -15,8 +16,9 @@ class QVulkanInstance;
 class QLocalServer;
 class WallpaperOutput;
 
-// The running vantapaper daemon: owns one WallpaperOutput per screen, the playlist,
-// the autorotation timer and the IPC server that vantapaperctl talks to.
+// The running vantapaper daemon: owns one WallpaperOutput per screen (each with its OWN
+// playlist, so monitors can show different wallpapers), the autorotation timer and the IPC
+// server that vantapaperctl talks to.
 class Daemon : public QObject
 {
     Q_OBJECT
@@ -32,9 +34,10 @@ private:
     void loadConfig();
     void createOutputs();
     void pollHdrStates(); // ask Hyprland for each monitor's HDR/SDR preset
-    void showCurrent();             // decode + show current with a random pool transition
-    void showCurrent(Transition t); // ... with a specific transition (directional next/prev)
-    void updateStateLinks(const QString &imagePath);
+    void showAll();             // (re)show every output's current image, random pool transition
+    void showAll(Transition t); // ... with a specific transition (directional next/prev)
+    void showOne(WallpaperOutput *win, const QString &path, Transition t, quint64 gen);
+    void updateStateLink(const QString &name, const QString &imagePath);
     Transition pickTransition() const;          // a random transition from the enabled pool
     Transition resolveSpec(const TransitionSpec &s) const; // spec -> Transition (randomised fields)
 
@@ -47,7 +50,8 @@ private:
     void startIpc();
 
     QVulkanInstance *m_inst = nullptr;
-    QString m_dir;
+    QString m_dir; // global default source folder (per-output overrides in m_outputDirs)
+    QHash<QString, QString> m_outputDirs; // screen name -> source folder override (from config "outputs")
 
     // Filmstrip mode: ties next/previous (and autorotation) to a directional slide.
     enum class Series { None, Horizontal, Vertical };
@@ -61,8 +65,12 @@ private:
     Series m_series = Series::None;
     int m_transitionMs = 600;
 
-    Playlist m_playlist;
-    std::vector<std::unique_ptr<WallpaperOutput>> m_outputs;
+    // One WallpaperOutput per screen, each with its own playlist (so monitors differ).
+    struct OutputState {
+        std::unique_ptr<WallpaperOutput> win;
+        Playlist playlist;
+    };
+    std::vector<OutputState> m_outputs;
     QTimer m_timer;
     QTimer m_hdrPoll;
     QLocalServer *m_server = nullptr;
