@@ -2,6 +2,12 @@
 
 #include "rhiwindow.h"
 #include "hdr_image.h"
+#include "video_source.h"
+#include "state_frame.h"
+#include "playlist.h"
+
+#include <QCryptographicHash>
+#include <QDateTime>
 
 #include <QGuiApplication>
 #include <QScreen>
@@ -47,6 +53,17 @@ static const char *kDefaultConfig = R"(// vantapaper configuration (JSONC: // an
   // "ascending" -> alphabetical by filename. "random" -> shuffle-bag: every image
   // shows once before any repeats, never repeating across a reshuffle.
   "sort": "ascending",
+
+  // --- Video wallpapers ---
+  // Videos (.mp4/.mkv/.webm/.mov/.m4v) rotate alongside stills: the first frame
+  // transitions in, then the video plays and loops (hard cut) until the next
+  // rotation. HDR video (PQ/HLG, e.g. 10-bit BT.2020 AV1) renders natively on HDR
+  // monitors and tone-maps on SDR ones, exactly like still wallpapers.
+  // "hwdec": "auto" decodes on the GPU (NVDEC) when possible, falling back to
+  // software automatically; "off" forces software decode (dav1d etc.).
+  "video": {
+    "hwdec": "auto"
+  },
 
   // --- Transitions ---
   // A random one is chosen from "enabled" on each change. Available: "fade", "wipe",
@@ -274,6 +291,10 @@ void Daemon::loadConfig()
         }
     }
 
+    const QJsonObject vid = o.value(QStringLiteral("video")).toObject();
+    m_videoHwdec = vid.value(QStringLiteral("hwdec")).toString(QStringLiteral("auto"))
+                       .toLower() != QLatin1String("off");
+
     // Filmstrip mode: tie next/previous (and autorotation) to a directional slide.
     const QString series = tr.value(QStringLiteral("series")).toString().toLower();
     if (series == QLatin1String("horizontal"))    m_series = Series::Horizontal;
@@ -431,6 +452,10 @@ void Daemon::showAll(Transition t)
 
 void Daemon::showOne(WallpaperOutput *win, const QString &path, Transition t, quint64 gen)
 {
+    if (Playlist::isVideoPath(path)) {
+        showVideo(win, path, t, gen);
+        return;
+    }
     // Decode off the main thread so large images don't freeze the switch. The current
     // wallpaper stays on screen until the new one is ready; stale decodes (an older gen)
     // are dropped. The output lives for the daemon's lifetime, so `win` stays valid.
@@ -457,7 +482,71 @@ void Daemon::showOne(WallpaperOutput *win, const QString &path, Transition t, qu
     }));
 }
 
-void Daemon::updateStateLink(const QString &name, const QString &imagePath)
+// The async payload of a video open: the shared source, its first frame (the
+// transition still) and the cached state PNG the lockscreen link points at.
+struct VideoOpen {
+    std::shared_ptr<VideoSource> src;
+    std::shared_ptr<const HdrImage> still;
+    QString stillPng;
+};
+
+void Daemon::showVideo(WallpaperOutput *win, const QString &path, Transition t, quint64 gen)
+{
+    const QString name = win->screenName();
+    const bool hwdec = m_videoHwdec;
+
+    auto *watcher = new QFutureWatcher<VideoOpen>(this);
+    connect(watcher, &QFutureWatcherBase::finished, this, [this, watcher, win, name, path, gen, t]() {
+        const VideoOpen r = watcher->result();
+        watcher->deleteLater();
+        if (gen != m_decodeGen)
+            return; // superseded by a newer switch
+        if (!r.src || !r.still) {
+            // Unusable video: keep the current wallpaper until the next rotation.
+            qWarning("vantapaper: failed to open video %s", qPrintable(path));
+            return;
+        }
+        win->setVideo(r.src, r.still, t);
+        updateStateLink(name, r.stillPng.isEmpty() ? path : r.stillPng, path);
+        qInfo("vantapaper: %s <- %s (video, %s, %dx%d @ %.0f fps)", qPrintable(name),
+              qPrintable(path), r.src->usingHwdec() ? "NVDEC" : "software",
+              r.src->size().width(), r.src->size().height(), r.src->avgFrameRate());
+    });
+    watcher->setFuture(QtConcurrent::run([path, hwdec]() -> VideoOpen {
+        VideoOpen r;
+        auto src = VideoSource::acquire(path);
+        if (!src->ensureOpen(hwdec))
+            return r;
+        r.still = src->firstFrame();
+        if (!r.still)
+            return r;
+        r.src = std::move(src);
+
+        // Cache the first frame as a PNG for the lockscreen state link (keyed on
+        // path+mtime so an edited video re-renders). Prune stale entries older than
+        // an hour so a parallel open on another output can't lose its fresh PNG.
+        const QString dir = stateDir() + QStringLiteral("/.frames");
+        QDir().mkpath(dir);
+        const QFileInfo fi(path);
+        const QByteArray key = QCryptographicHash::hash(
+            (path + QLatin1Char(':') + QString::number(fi.lastModified().toSecsSinceEpoch())).toUtf8(),
+            QCryptographicHash::Sha1).toHex().left(16);
+        const QString png = dir + QLatin1Char('/') + QString::fromLatin1(key) + QStringLiteral(".png");
+        if (!QFile::exists(png) && !writeStatePng(png, *r.still))
+            return r; // src+still still usable; the link just falls back to the video path
+        r.stillPng = png;
+
+        const QDateTime cutoff = QDateTime::currentDateTime().addSecs(-3600);
+        const QFileInfoList old = QDir(dir).entryInfoList({ QStringLiteral("*.png") }, QDir::Files);
+        for (const QFileInfo &e : old)
+            if (e.lastModified() < cutoff && e.fileName() != QFileInfo(png).fileName())
+                QFile::remove(e.absoluteFilePath());
+        return r;
+    }));
+}
+
+void Daemon::updateStateLink(const QString &name, const QString &linkTarget,
+                             const QString &sourcePath)
 {
     if (name.isEmpty())
         return;
@@ -465,7 +554,16 @@ void Daemon::updateStateLink(const QString &name, const QString &imagePath)
     QDir().mkpath(dir);
     const QString link = dir + QLatin1Char('/') + name;
     QFile::remove(link);
-    QFile::link(imagePath, link);
+    QFile::link(linkTarget, link);
+
+    // Record the real wallpaper file (differs from the link target for videos,
+    // where the link points at a rendered first-frame PNG for the lockscreen).
+    const QString sidecar = link + QStringLiteral(".source");
+    QFile f(sidecar);
+    if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        f.write((sourcePath.isEmpty() ? linkTarget : sourcePath).toUtf8() + '\n');
+        f.close();
+    }
 }
 
 void Daemon::next()

@@ -37,7 +37,13 @@ private:
     void showAll();             // (re)show every output's current image, random pool transition
     void showAll(Transition t); // ... with a specific transition (directional next/prev)
     void showOne(WallpaperOutput *win, const QString &path, Transition t, quint64 gen);
-    void updateStateLink(const QString &name, const QString &imagePath);
+    // Video branch of showOne: open (hw->sw fallback) + first frame async, then
+    // setVideo; the state link points at a cached PNG of the first frame.
+    void showVideo(WallpaperOutput *win, const QString &path, Transition t, quint64 gen);
+    // linkTarget = decodable image for the lockscreen; sourcePath (when different)
+    // is recorded in a "<output>.source" sidecar so tools can see the real file.
+    void updateStateLink(const QString &name, const QString &linkTarget,
+                         const QString &sourcePath = QString());
     Transition pickTransition() const;          // a random transition from the enabled pool
     Transition resolveSpec(const TransitionSpec &s) const; // spec -> Transition (randomised fields)
 
@@ -58,6 +64,7 @@ private:
 
     // From config (~/.config/vantapaper/config.jsonc), env can override for testing.
     int m_durationSecs = 180;
+    bool m_videoHwdec = true; // "video": { "hwdec": "auto"|"off" }
     bool m_paused = true;
     bool m_sortRandom = false; // false = ascending, true = shuffle-bag
     QList<TransitionSpec> m_enabledTransitions {

@@ -10,6 +10,8 @@
 #include "cm_tagging.h"
 
 class QScreen;
+class VideoSource;
+struct VideoFrame;
 
 // One wallpaper surface for a single output (QScreen). Owns its own QRhi + Vulkan
 // swapchain so it can request an HDR (scRGB extended-linear) format and tag the
@@ -23,8 +25,14 @@ public:
     ~WallpaperOutput() override;
 
     // Show this image, playing `trans` (ignored for the very first image). The
-    // HdrImage is shared so one decode can feed every output.
+    // HdrImage is shared so one decode can feed every output. Stops any video.
     void setImage(std::shared_ptr<const HdrImage> image, const Transition &trans);
+
+    // Show a video: `firstFrame` transitions in as a still; live playback starts
+    // when the transition completes (transition OUT later freezes on the last
+    // shown frame, which stays resident in the outgoing texture).
+    void setVideo(std::shared_ptr<VideoSource> src,
+                  std::shared_ptr<const HdrImage> firstFrame, const Transition &trans);
 
     // Tell this output whether its monitor is currently in HDR or SDR mode, so it
     // can tag + render appropriately. Driven by the daemon's per-output detection.
@@ -41,7 +49,11 @@ private:
     void resizeSwapChain();
     void releaseSwapChain();
     void render();
-    void resizeTexture(int idx, const HdrImage &img);
+    void resizeTexture(int idx, int w, int h);
+    void stopVideo();
+    // (Re)create plane textures / RT / pipeline for the current video frame's
+    // size + layout; false = unusable (video is stopped). Fills m_videoUbo.
+    bool ensureVideoResources(const VideoFrame &vf, QRhiResourceUpdateBatch *rub);
 
     QVulkanInstance *m_inst = nullptr;
     QScreen *m_screen = nullptr;
@@ -55,6 +67,20 @@ private:
     std::unique_ptr<QRhiTexture> m_tex[2];
     std::unique_ptr<QRhiSampler> m_sampler;
     std::unique_ptr<QRhiBuffer> m_ubo;
+
+    // Video mode: the pending source is promoted to active when the in-transition
+    // completes; each new ring frame is uploaded as planes + converted into
+    // m_tex[m_curIndex] by an offscreen pass (video_convert.frag).
+    std::shared_ptr<VideoSource> m_video;        // live playback
+    std::shared_ptr<VideoSource> m_pendingVideo; // starts after the in-transition
+    std::shared_ptr<VideoFrame> m_curFrame;      // last uploaded (kept alive for the GPU)
+    qint64 m_videoEpochNs = 0;                   // per-output pacing adjust (pauses)
+    std::unique_ptr<QRhiTexture> m_planeTex[3];  // Y + chroma (+ V when planar)
+    std::unique_ptr<QRhiTextureRenderTarget> m_videoRt[2]; // one per m_tex
+    std::unique_ptr<QRhiRenderPassDescriptor> m_videoRp;
+    std::unique_ptr<QRhiShaderResourceBindings> m_videoSrb;
+    std::unique_ptr<QRhiGraphicsPipeline> m_videoPs;
+    std::unique_ptr<QRhiBuffer> m_videoUbo;
 
     std::shared_ptr<const HdrImage> m_incoming;
     int m_curIndex = 0;          // which texture holds the incoming image

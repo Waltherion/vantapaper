@@ -10,6 +10,7 @@
 
 #include "daemon.h"
 #include "hdr_image.h"
+#include "video_source.h"
 
 #include <cstdio>
 #include <cmath>
@@ -134,6 +135,13 @@ int main(int argc, char **argv)
 
     if (argc >= 2 && QString::fromLocal8Bit(argv[1]) == QLatin1String("thumbnail"))
         return runThumbnail(argc, argv);
+
+    // `vantapaper probe-video <file>`: open through the exact playback decode path
+    // (NVDEC + transfer, sw fallback) and report colour metadata + sustained fps.
+    if (argc >= 3 && QString::fromLocal8Bit(argv[1]) == QLatin1String("probe-video")) {
+        QCoreApplication app(argc, argv);
+        return VideoSource::probeBench(QString::fromLocal8Bit(argv[2]));
+    }
 
     QGuiApplication app(argc, argv);
 

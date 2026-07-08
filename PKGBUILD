@@ -16,6 +16,7 @@ depends=(
   'libheif'
   'libultrahdr'
   'lcms2'
+  'ffmpeg'             # video wallpapers: demux + decode (NVDEC hwaccel, sw fallback)
   'wayland'
   'vulkan-icd-loader'
 )

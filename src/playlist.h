@@ -33,6 +33,10 @@ public:
     // Jump to a specific file (absolute path). Returns false if it's not in the list.
     bool setCurrentPath(const QString &path);
 
+    // True if the path's extension marks a video wallpaper (single source of truth
+    // for the daemon's still/video dispatch).
+    static bool isVideoPath(const QString &path);
+
 private:
     int drawRandomIndex(); // pull the next index from the shuffle-bag (no immediate repeat)
     void resetHistory();   // history := { current }, bag cleared

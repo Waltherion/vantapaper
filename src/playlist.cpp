@@ -4,12 +4,26 @@
 #include <QRandomGenerator>
 #include <algorithm>
 
-static const QStringList kExtensions = {
+// Video wallpapers rotate alongside stills (played by VideoSource via FFmpeg).
+static const QStringList kVideoExtensions = {
+    QStringLiteral("mp4"), QStringLiteral("mkv"), QStringLiteral("webm"),
+    QStringLiteral("mov"), QStringLiteral("m4v"),
+};
+
+static const QStringList kExtensions = QStringList{
     QStringLiteral("png"),  QStringLiteral("jpg"),  QStringLiteral("jpeg"),
     QStringLiteral("avif"), QStringLiteral("jxl"),  QStringLiteral("heic"),
     QStringLiteral("heif"), QStringLiteral("webp"), QStringLiteral("tiff"),
     QStringLiteral("tif"),  QStringLiteral("bmp"),
-};
+} + kVideoExtensions;
+
+bool Playlist::isVideoPath(const QString &path)
+{
+    const int dot = path.lastIndexOf(QLatin1Char('.'));
+    if (dot < 0)
+        return false;
+    return kVideoExtensions.contains(path.mid(dot + 1).toLower());
+}
 
 void Playlist::load(const QString &dir)
 {

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(vantapaper VERSION 0.1.0 LANGUAGES C CXX)
+project(vantapaper VERSION 0.2.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -29,6 +29,9 @@ pkg_check_modules(Jxl REQUIRED IMPORTED_TARGET libjxl)
 # libheif for HEIC/HEIF (HDR PQ/HLG, 10/12-bit).
 pkg_check_modules(Heif REQUIRED IMPORTED_TARGET libheif)
 
+# FFmpeg for video wallpapers: demux + decode (NVDEC via cuda hwaccel, sw fallback).
+pkg_check_modules(FFmpeg REQUIRED IMPORTED_TARGET libavformat libavcodec libavutil)
+
 # --- Generate the wp-color-management-v1 client protocol glue ---
 set(CM_XML "${WAYLAND_PROTOCOLS_DIR}/staging/color-management/color-management-v1.xml")
 set(CM_GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/wl-protocols")
@@ -53,6 +56,8 @@ add_executable(vantapaper
     src/hdr_image.cpp
     src/playlist.cpp
     src/daemon.cpp
+    src/video_source.cpp
+    src/state_frame.cpp
     "${CM_SOURCE}"
     "${CM_HEADER}"
 )
@@ -70,6 +75,7 @@ target_link_libraries(vantapaper PRIVATE
     PkgConfig::Lcms2
     PkgConfig::Jxl
     PkgConfig::Heif
+    PkgConfig::FFmpeg
     ${UHDR_LIB}
 )
 
@@ -81,6 +87,7 @@ qt6_add_shaders(vantapaper "vantapaper_shaders"
     FILES
         shaders/fullscreen.vert
         shaders/image.frag
+        shaders/video_convert.frag
 )
 
 include(GNUInstallDirs)
