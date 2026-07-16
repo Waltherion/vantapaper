@@ -75,7 +75,11 @@ public:
     // Newest frame with timelineNs <= now (per-output epoch adjust handles pauses:
     // a gap > 250ms rebases instead of fast-forwarding). Null if nothing new is
     // ready -- the caller keeps showing its current frame. GUI thread.
-    std::shared_ptr<VideoFrame> frameFor(qint64 *epochAdjustNs);
+    // Newest due frame on the SHARED timeline. The pause/occlusion epoch adjust is shared per
+    // source (not per output) so two outputs on the same file stay in lock-step: independent
+    // epochs would desync after an occlusion rebase and the faster output would pop frames out
+    // of the small shared ring before the slower one saw them, starving it (permanent freeze).
+    std::shared_ptr<VideoFrame> frameFor();
 
     bool failed() const { return m_error.load(); } // decode thread hit a fatal error
 
@@ -125,6 +129,7 @@ private:
     std::deque<std::shared_ptr<VideoFrame>> m_ring;
     std::atomic<bool> m_stop{ false };
     std::atomic<bool> m_error{ false };
+    qint64 m_epochAdjustNs = 0;             // shared pause/occlusion rebase (guarded by m_ringMutex)
     bool m_started = false;
     QElapsedTimer m_clock;   // master playback clock, started in start()
     qint64 m_loopBaseNs = 0; // accumulated duration of completed loops

@@ -127,7 +127,6 @@ void WallpaperOutput::stopVideo()
     m_video.reset();
     m_pendingVideo.reset();
     m_curFrame.reset();
-    m_videoEpochNs = 0;
 }
 
 void WallpaperOutput::init()
@@ -396,7 +395,7 @@ void WallpaperOutput::render()
     if (m_video && m_video->failed())
         stopVideo(); // last shown frame stays as a still until the next rotation
     if (m_video && !m_incomingDirty) {
-        std::shared_ptr<VideoFrame> vf = m_video->frameFor(&m_videoEpochNs);
+        std::shared_ptr<VideoFrame> vf = m_video->frameFor();
         if (vf && vf != m_curFrame) {
             m_curFrame = std::move(vf); // held so the planes stay valid for the GPU
             QRhiResourceUpdateBatch *vub = m_rhi->nextResourceUpdateBatch();

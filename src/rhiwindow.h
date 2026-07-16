@@ -74,7 +74,6 @@ private:
     std::shared_ptr<VideoSource> m_video;        // live playback
     std::shared_ptr<VideoSource> m_pendingVideo; // starts after the in-transition
     std::shared_ptr<VideoFrame> m_curFrame;      // last uploaded (kept alive for the GPU)
-    qint64 m_videoEpochNs = 0;                   // per-output pacing adjust (pauses)
     std::unique_ptr<QRhiTexture> m_planeTex[3];  // Y + chroma (+ V when planar)
     std::unique_ptr<QRhiTextureRenderTarget> m_videoRt[2]; // one per m_tex
     std::unique_ptr<QRhiRenderPassDescriptor> m_videoRp;

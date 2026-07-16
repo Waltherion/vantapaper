@@ -432,6 +432,7 @@ void VideoSource::start()
         return;
     m_started = true;
     m_stop.store(false);
+    m_epochAdjustNs = 0;
     m_clock.start();
     m_thread = std::thread(&VideoSource::decodeLoop, this);
 }
@@ -492,13 +493,15 @@ void VideoSource::decodeLoop()
     }
 }
 
-std::shared_ptr<VideoFrame> VideoSource::frameFor(qint64 *epochAdjustNs)
+std::shared_ptr<VideoFrame> VideoSource::frameFor()
 {
     if (!m_started)
         return nullptr;
-    const qint64 now = m_clock.nsecsElapsed() - *epochAdjustNs;
 
     std::lock_guard<std::mutex> lk(m_ringMutex);
+    // `now` uses the SHARED epoch (under the ring lock), so both outputs pace identically and
+    // neither pops the shared ring past the other.
+    const qint64 now = m_clock.nsecsElapsed() - m_epochAdjustNs;
     if (m_ring.empty())
         return nullptr;
 
@@ -515,7 +518,7 @@ std::shared_ptr<VideoFrame> VideoSource::frameFor(qint64 *epochAdjustNs)
     // Long gap (occlusion / compositor throttling): rebase instead of fast-forwarding.
     const qint64 gap = now - pick->timelineNs;
     if (gap > 250000000LL)
-        *epochAdjustNs += gap;
+        m_epochAdjustNs += gap;
     return pick;
 }
 
